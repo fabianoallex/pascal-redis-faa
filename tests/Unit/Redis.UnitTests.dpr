@@ -17,9 +17,12 @@ uses
   DUnitX.TestFramework,
   Redis.Types in '..\..\src\Redis.Types.pas',
   Redis.Resp in '..\..\src\Redis.Resp.pas',
+  Redis.Transport in '..\..\src\Redis.Transport.pas',
+  Redis.Connection in '..\..\src\Redis.Connection.pas',
   Redis.DUnitXCompat in 'Redis.DUnitXCompat.pas',
   Redis.TypesTests in 'Redis.TypesTests.pas',
-  Redis.RespTests in 'Redis.RespTests.pas';
+  Redis.RespTests in 'Redis.RespTests.pas',
+  Redis.ConnectionTests in 'Redis.ConnectionTests.pas';
 
 var
   runner: ITestRunner;

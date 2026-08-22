@@ -248,6 +248,99 @@ esperando o resto da resposta é exatamente o comportamento desejado.
 
 ---
 
+## 17. Erro do servidor levanta; erro de conexão invalida (M2)
+
+São duas coisas diferentes e a conexão trata cada uma do seu jeito.
+
+Um `-WRONGTYPE`, `-NOSCRIPT` ou `-NOAUTH` é uma **resposta válida**, só que negativa: o
+protocolo funcionou, o comando é que não fazia sentido. `Execute` levanta
+`ERedisReplyError` (com o `Code` pronto para testar), a conexão continua sã e volta ao pool
+normalmente. Invalidar a conexão a cada erro de aplicação torraria uma conexão do pool por
+`GET` em chave de tipo errado.
+
+Um erro de I/O, um timeout ou um fluxo malformado são o oposto: a conexão está perdida. Ela
+fecha o socket na hora, passa a recusar comandos e **não** reexecuta o comando em voo — `INCR`,
+`LPUSH` e `SETNX` não são idempotentes, e repetir em silêncio corromperia dados (decisão 4).
+Tudo o que vem da camada de transporte (`ERedisTransport`, `ERedisTls`, erro de socket da RTL)
+é traduzido para `ERedisConnectionLost`: do ponto de vista de quem chamou é tudo o mesmo fato,
+e o chamador não deveria precisar conhecer as exceções das camadas de baixo.
+
+`ExecuteRaw` existe para quem prefere ramificar sem exceção: devolve o nó `rkError` em vez de
+levantar. É o que o `Ping` usa — um health check que levanta por erro de servidor é um health
+check que não serve para decidir nada.
+
+O pipeline **nunca** levanta por erro de servidor. Num lote de dez comandos, o servidor
+executou os dez de qualquer jeito; abortar no primeiro erro esconderia o resultado dos outros
+nove, e saber *qual* falhou é justamente o que interessa. Cada item da resposta pode ser um
+`rkError`.
+
+---
+
+## 18. Conexão suja é um estado, não um erro (M2)
+
+Lidas todas as respostas esperadas, `TRedisReader.Buffered` tem que ser zero. Se sobrou byte,
+o que sobrou é resposta de um comando anterior — o caso clássico: um comando sofreu timeout,
+o cliente desistiu, e a resposta chegou depois. A resposta que acabou de ser entregue está
+correta, então levantar exceção seria mentira; mas o próximo comando nessa conexão leria a
+sobra achando que é a resposta dele, e a partir daí todo valor sai deslocado por um.
+
+Por isso a conexão marca `IsDirty` em vez de levantar, e `IsUsable` (aberta, inteira e limpa)
+é o que o pool do M3 consulta no checkin para destruir em vez de devolver. É o bug clássico
+de cliente Redis, e ele merece detecção explícita porque em produção se manifesta como "o
+sistema começou a devolver o valor da chave errada", muito longe da causa.
+
+---
+
+## 19. `Abort` não pega o lock — de propósito (M2)
+
+`Close` é ordenado: pega o lock e espera o comando em voo terminar. Só que é exatamente por
+isso que ele não serve para o caso em que a conexão está pendurada num `Receive` que nunca
+volta — ele ficaria esperando no lock, junto com a thread travada.
+
+`Abort` derruba o socket **sem** pegar o lock. A leitura pendurada devolve zero, vira
+`ERedisConnectionLost` na thread que estava esperando, e essa thread faz a faxina (que é
+sempre sob o lock). O `Abort` em si só marca e fecha o handle: não libera reader nem stream,
+que a outra thread pode estar usando naquele instante. É a mesma manobra do `Close` do
+`TRedisTcpSocket` herdado da lib AMQP, e é o que o watchdog de timeout do M3 vai chamar.
+
+---
+
+## 20. Em RESP2 não se emite `HELLO` (M2)
+
+Seria cômodo mandar `HELLO 2` em toda conexão só para saber a versão do servidor e o id da
+conexão. Mas `HELLO` só existe a partir do Redis 6.0: fazer isso exigiria Redis 6 de quem
+pediu RESP2, que é justamente o modo que existe para funcionar em qualquer servidor.
+
+Então em RESP2 o handshake é `AUTH` (quando há senha), `CLIENT SETNAME` (quando há nome) e
+`SELECT` (quando o banco difere de 0) — nessa ordem, porque sem autenticar antes o servidor
+recusaria os outros dois com `NOAUTH`. `ServerVersion` e `ServerId` ficam vazios; quem
+precisa deles em RESP2 usa `INFO server`.
+
+Em RESP3 o `HELLO 3` faz autenticação e troca de protocolo num round-trip só. Se o servidor
+não conhecer o comando, a lib traduz o `unknown command 'HELLO'` para uma mensagem que
+explica o que aconteceu de verdade — repassar o erro cru mandaria o usuário caçar um comando
+que ele não escreveu.
+
+---
+
+## 21. A conexão inteira é testável sem rede (M2)
+
+`TRedisConnection.CreateOnStream` adota um `TStream` já conectado no lugar de abrir socket.
+Com isso as suítes unitárias sobem a conexão inteira sobre um servidor falso em memória e
+conferem byte a byte o que vai para o fio (handshake, unified request protocol, lote de
+pipeline) — e, mais importante, exercitam os caminhos de falha que são caros de reproduzir
+contra um servidor de verdade: fim de fluxo no meio da resposta, `send` parcial, `recv` de um
+byte por vez e resposta órfã sobrando no buffer.
+
+O servidor falso entrega as respostas em **pacotes**, e uma leitura nunca atravessa a fronteira
+entre dois pacotes. Isso não é detalhe: um fake que despeja tudo de uma vez faria o leitor
+encher o buffer com respostas futuras, e a conexão se declararia suja (decisão 18) sem ter
+culpa. Duas respostas no mesmo pacote é como se simula, de propósito, a resposta órfã.
+
+O mesmo construtor serve ao pool do M3 quando ele quiser injetar um transporte já pronto.
+
+---
+
 ## Compatibilidade e nomenclatura
 
 A lib fala RESP, não depende da implementação: funciona com **Redis**, **Valkey**, **KeyDB**

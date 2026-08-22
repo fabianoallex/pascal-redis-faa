@@ -3,8 +3,10 @@
 Cliente **Redis** (protocolo RESP2/RESP3) para **Free Pascal/Lazarus e Delphi**, numa
 única codebase, escrito do zero. Licença MIT.
 
-> **Status: em construção (M0 — esqueleto).** A lib ainda tem apenas as camadas de
-> transporte e concorrência. O roadmap completo está em `CLAUDE.md`.
+> **Status: em construção (M2 — conexão + `Execute` genérico).** Já dá para conectar,
+> autenticar, executar **qualquer** comando do Redis e usar pipeline, em RESP2 ou RESP3.
+> Ainda faltam pool e timeouts (M3), as fachadas tipadas por família (M4), TLS (M5),
+> transações (M6), pub/sub (M7) e streams (M8). O roadmap completo está em `CLAUDE.md`.
 
 Projeto irmão da [`pascal-amqp-faa`](../pascal-amqp-faa) (cliente AMQP 0-9-1) e da
 `pascal-pipes-faa` (IPC), com as mesmas regras: codebase dual FPC 3.2.2 + Delphi 12,
@@ -48,6 +50,67 @@ com o override:
 docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
 ```
 
+## Uso
+
+```pascal
+uses
+  SysUtils, Redis.Types, Redis.Connection;
+
+var
+  LParams: TRedisParams;
+  LConn: TRedisConnection;
+  LPipe: TRedisPipeline;
+  LRespostas: TRedisReplyArray;
+begin
+  LParams := RedisDefaultParams;      // localhost:6379, banco 0, RESP2
+  LParams.ClientName := 'minha-app';  // aparece no CLIENT LIST do servidor
+
+  LConn := TRedisConnection.Create(LParams);
+  try
+    LConn.Open;
+
+    LConn.Execute('SET', ['usuario:1:nome', 'Fabiano', 'EX', 3600]);
+    WriteLn(LConn.Execute('GET', ['usuario:1:nome']).AsString);
+
+    // Chave ausente devolve nulo — que NÃO é o mesmo que string vazia.
+    if LConn.Execute('GET', ['usuario:2:nome']).IsNull then
+      WriteLn('não existe');
+
+    // Pipeline: N comandos numa ida e volta só.
+    LPipe := TRedisPipeline.Create;
+    try
+      LPipe.Queue('INCR', ['visitas']);
+      LPipe.Queue('LPUSH', ['eventos', 'login']);
+      LPipe.Queue('LLEN', ['eventos']);
+      LRespostas := LConn.ExecutePipeline(LPipe);
+      WriteLn('visitas: ', LRespostas[0].AsInteger);
+    finally
+      LPipe.Free;
+    end;
+  finally
+    LConn.Free;   // o Close também fecha; o destrutor cobre o caminho de exceção
+  end;
+end.
+```
+
+`Execute` alcança qualquer comando desde já — as fachadas tipadas por família (M4) serão
+uma camada por cima, nunca um pré-requisito.
+
+**Binário por contrato.** Argumento `TBytes` vai byte a byte para o fio e `AsBytes`
+devolve o valor cru; as sobrecargas `string` passam por UTF-8. Um valor com CRLF, zero ou
+0xFF no meio sobrevive ao round-trip.
+
+**Erros.** Erro do servidor (`WRONGTYPE`, `NOSCRIPT`, `NOAUTH`…) levanta
+`ERedisReplyError`, que traz o `Code` pronto para testar, e a conexão continua utilizável.
+Erro de I/O levanta `ERedisConnectionLost` e **invalida** a conexão: o comando em voo não é
+reexecutado, porque `INCR`, `LPUSH` e `SETNX` não são idempotentes — a decisão de repetir é
+de quem chamou. `ExecuteRaw` devolve o erro como resposta, sem levantar, e o pipeline nunca
+levanta por erro de servidor (cada item pode ser um erro).
+
+**RESP3** é opt-in: `LParams.Protocol := rpRESP3` faz o handshake com `HELLO 3`. O código da
+aplicação não muda — um `HGETALL` tem a mesma forma nos dois protocolos, porque o mapa do
+RESP3 é guardado achatado.
+
 ## Build
 
 **FPC (linha de comando):**
@@ -65,9 +128,10 @@ linha de comando).
 
 ## Testes unitários
 
-Não precisam de servidor: o codec RESP é exercitado sobre uma fonte de bytes em
+Não precisam de servidor. O codec RESP é exercitado sobre uma fonte de bytes em
 memória, que entrega a resposta em pedaços de tamanho controlado para reproduzir
-leituras parciais de rede.
+leituras parciais de rede; a conexão inteira (handshake, `Execute`, pipeline,
+invalidação) sobe sobre um servidor falso, também em memória.
 
 **FPC/Lazarus (FPCUnit):**
 

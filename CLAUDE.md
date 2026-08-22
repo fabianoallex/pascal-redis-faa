@@ -135,7 +135,7 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
 
 ## Estrutura de units
 
-Existentes (M0 + M1):
+Existentes (M0 + M1 + M2):
 
 ```
 src/redis.inc
@@ -145,13 +145,13 @@ src/Redis.Transport.Tls.pas      (cópia renomeada)
 src/Redis.Transport.OpenSSL.pas  (cópia renomeada)
 src/Redis.Types.pas              TRedisReplyKind, IRedisReply, TRedisArg, excecoes, params, Utf8Encode/Decode
 src/Redis.Resp.pas               codec RESP2/RESP3: RedisEncodeCommand, TRedisReader, IRedisByteSource
+src/Redis.Connection.pas         TRedisConnection (1 socket, handshake, Execute/ExecuteRaw), TRedisPipeline, TRedisSocketStream
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao
 `packages/pascal_redis_faa.pas`):
 
 ```
-src/Redis.Connection.pas          1 socket, HELLO/AUTH/SELECT, Execute, pipeline
 src/Redis.Pool.pas                checkout/checkin, invalidacao, health check
 src/Redis.Client.pas              fachada + Execute generico
 src/Redis.Commands.Keys.pas       DEL EXPIRE TTL SCAN TYPE RENAME
@@ -187,8 +187,9 @@ nunca bloqueia o usuário da lib.
 - **Servidor de teste:** `docker/docker-compose.yml` (redis:7.2-alpine, porta 6379) e o
   override `docker-compose.tls.yml` (6380, precisa dos certs de `docker/certs`).
   **Rode o SmokeTest após qualquer mudança na lib.**
-- **Suítes unitárias (M1, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
-  (FPCUnit). Não precisam de servidor. Rodar as do FPC com
+- **Suítes unitárias (M1 + M2, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
+  (FPCUnit). Não precisam de servidor — a `Redis.ConnectionTests` sobe a conexão inteira
+  sobre um servidor falso em memória (`TRedisConnection.CreateOnStream`). Rodar as do FPC com
   `lazbuild -B tests\Unit\fpc\RedisUnitTestsFpc.lpi` e depois
   `tests\Unit\fpc\RedisUnitTestsFpc.exe --all --format=plain` (sem parâmetros abre a GUI).
   As do Delphi só pelo IDE, via `Redis.groupproj`.
@@ -246,19 +247,45 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
      — devolver 0 confundiria "chave ausente" com "chave que vale zero". `AsString` num nulo
      devolve `''` (string tem vazio natural; inteiro não), e `AsBoolean` devolve False (é
      como o RESP2 nega um `SET NX`).
-   - **`TRedisReader.Buffered`** é a mecânica de detecção de conexão suja do M3: depois de
-     ler a resposta de um comando isolado tem que ser zero.
+   - **`TRedisReader.Buffered`** é a mecânica de detecção de conexão suja (usada pelo M2
+     em `IsDirty`): depois de ler a resposta de um comando isolado tem que ser zero.
    - Tipos em streaming (`$?`, `*?`) levantam erro claro: o servidor Redis não os emite.
-2. **M2 — `Redis.Connection` + `Execute` genérico.** `HELLO`/`AUTH`/`SELECT`,
-   escrita+leitura na thread chamadora sob lock. O SmokeTest cresce para SET/GET/DEL/INFO.
-   Fecha com PASS no Win64.
+2. ~~**M2 — `Redis.Connection` + `Execute` genérico.**~~ **Concluído em 2026-08-22.**
+   `TRedisConnection` (1 socket, lock, `TRedisReader`), handshake (`HELLO 3` ou
+   `AUTH` + `CLIENT SETNAME` + `SELECT`), `Execute`/`ExecuteRaw`/`ExecuteArgs`, `Ping`,
+   `Select`, `Abort` e `TRedisPipeline`. Escrita e leitura acontecem na thread chamadora,
+   sob o lock — não há thread de leitura. **Validado nos DOIS compiladores** contra o
+   container (2026-08-22): SmokeTest **PASS nos 50 passos** no FPC (fpc direto e lazbuild
+   nos dois build modes) **e no Delphi 12** (pelo `Redis.groupproj`), cobrindo
+   SET/GET/DEL/EXISTS/INCR/TTL/INFO/DBSIZE, binário com CRLF, UTF-8, bulk de 200 KB,
+   pipeline (inclusive erro no meio do lote), `WRONGTYPE`, `SELECT` entre bancos, RESP3 via
+   `HELLO 3` (versão, id, mapa e double nativos) e invalidação de conexão. As duas suítes
+   unitárias passam com **178/178** (133 do M1 + 45 novos) — FPCUnit e DUnitX, este com
+   `Tests Leaked: 0`. A contagem idêntica dos dois lados é o que confirma a paridade de
+   cobertura; o zero de leaks confirma que a conexão não deixa reader, stream nem árvore de
+   resposta para trás (nem no caminho de invalidação, que libera tudo no meio do erro).
+
+   Decisões tomadas aqui (racional nas seções 17–21 de `docs/DECISOES.md`):
+   - **Erro de servidor levanta `ERedisReplyError` e NÃO invalida a conexão**; erro de I/O,
+     timeout ou fluxo malformado invalidam e viram `ERedisConnectionLost` — inclusive o que
+     sobe do transporte, que é traduzido para não vazar exceção de camada de baixo.
+     `ExecuteRaw` devolve o `rkError` sem levantar, e **pipeline nunca levanta**.
+   - **`IsDirty`/`IsUsable`**: sobrou byte depois da última resposta = conexão contaminada.
+     Não é erro (a resposta entregue está certa), é estado — e é o que o pool do M3 checa.
+   - **`Abort` não pega o lock**, para conseguir desbloquear uma leitura pendurada em outra
+     thread; a faxina fica para quem estava lendo.
+   - **Em RESP2 não se emite `HELLO`** (só existe no Redis 6+), então `ServerVersion` e
+     `ServerId` ficam vazios nesse modo.
+   - **`CreateOnStream`** adota um `TStream` pronto: é o que torna a conexão inteira
+     testável sem rede (e o que o pool usará para injetar transporte).
 3. **M3 — Pool + timeouts + reconexão.** Inclui a adição de `SetReceiveTimeout` no
-   transporte (ver "Peças herdadas") e a invalidação de conexão suja. Fecha com a suíte de
-   integração contra o Redis real, incluindo o teste de conexão-suja.
+   transporte (ver "Peças herdadas") e o descarte da conexão suja no checkin (a detecção
+   já existe desde o M2: `IsDirty`/`IsUsable`). Fecha com a suíte de integração contra o
+   Redis real, incluindo o teste de conexão-suja.
 4. **M4 — Famílias Strings/Keys/Hashes/Lists/Sets/ZSets.** Integração por família.
 5. **M5 — TLS.** `UseTls`/`TlsVerifyPeer` nos params, SmokeTest `--tls` PASS nos dois
    backends (SChannel e OpenSSL).
-6. **M6 — Pipeline + `MULTI`/`EXEC`/`WATCH` + `EVAL` com cache de SHA.**
+6. **M6 — `MULTI`/`EXEC`/`WATCH` + `EVAL` com cache de SHA** (o pipeline já saiu no M2).
 7. **M7 — Pub/Sub (RESP2) + RESP3 opt-in via `HELLO 3`.**
 8. **M8 — Streams + consumer groups.** Fecha o v1.
 9. **M9 — 3 samples GUI duais VCL/LCL:** `CacheAsideVcl` (GET/SETEX/DEL, hit/miss),

@@ -34,6 +34,10 @@
         <UnitName Value="Redis.Resp"/>
       </Item>
       <Item>
+        <Filename Value="..\src\Redis.Connection.pas"/>
+        <UnitName Value="Redis.Connection"/>
+      </Item>
+      <Item>
         <Filename Value="..\src\Redis.Transport.pas"/>
         <UnitName Value="Redis.Transport"/>
       </Item>

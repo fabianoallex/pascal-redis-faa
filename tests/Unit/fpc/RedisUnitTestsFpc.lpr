@@ -21,7 +21,8 @@ uses
   {$ENDIF}
   Classes, consoletestrunner, testregistry,
   Redis.TypesTests,
-  Redis.RespTests;
+  Redis.RespTests,
+  Redis.ConnectionTests;
 
 var
   ConsoleApp: TTestRunner;

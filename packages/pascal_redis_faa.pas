@@ -8,7 +8,7 @@ unit pascal_redis_faa;
 interface
 
 uses
-  Redis.Threading, Redis.Types, Redis.Resp, Redis.Transport, 
+  Redis.Threading, Redis.Types, Redis.Resp, Redis.Connection, Redis.Transport, 
   Redis.Transport.Tls, Redis.Transport.OpenSSL;
 
 implementation

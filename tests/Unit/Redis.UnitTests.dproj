@@ -124,9 +124,12 @@
         </DelphiCompile>
         <DCCReference Include="..\..\src\Redis.Types.pas"/>
         <DCCReference Include="..\..\src\Redis.Resp.pas"/>
+        <DCCReference Include="..\..\src\Redis.Transport.pas"/>
+        <DCCReference Include="..\..\src\Redis.Connection.pas"/>
         <DCCReference Include="Redis.DUnitXCompat.pas"/>
         <DCCReference Include="Redis.TypesTests.pas"/>
         <DCCReference Include="Redis.RespTests.pas"/>
+        <DCCReference Include="Redis.ConnectionTests.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>
