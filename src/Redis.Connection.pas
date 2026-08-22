@@ -213,10 +213,18 @@ type
     /// pool do M3 chama antes de emprestar uma conexao ociosa.
     function Ping: Boolean;
 
-    /// SELECT: troca o banco corrente e memoriza o novo valor (a reconexao do
-    /// M3 replaya este SELECT, ja' que o banco vive na conexao, nao no
-    /// servidor).
+    /// SELECT: troca o banco corrente e memoriza o novo valor (o pool replaya
+    /// este SELECT ao abrir uma conexao nova, ja' que o banco vive na conexao
+    /// e nao no servidor).
     procedure Select(ADatabase: Integer);
+
+    /// Ajusta o receive timeout desta conexao em tempo de execucao.
+    ///
+    /// Existe para o caso dos comandos bloqueantes: um BLPOP de 30 s numa
+    /// conexao com timeout de 5 s morreria de timeout ANTES de o comando
+    /// terminar. Esses comandos usam conexao propria, fora do pool, com o
+    /// timeout esticado para mais do que o do comando (ver docs/DECISOES.md).
+    procedure SetReceiveTimeout(AMilliseconds: Integer);
 
     /// Parametros com que a conexao foi criada.
     property Params: TRedisParams read FParams;
@@ -406,6 +414,12 @@ begin
         'TLS ainda nao esta ligado na conexao (chega no M5); use UseTls := False');
     FSocket := TRedisTcpSocket.Create;
     try
+      // Antes do Connect: os timeouts ficam guardados no socket e valem desde
+      // o primeiro byte lido — inclusive os do handshake, que e' onde um
+      // servidor que aceita a conexao mas nao responde mais faria a thread
+      // parar para sempre.
+      FSocket.SetReceiveTimeout(FParams.ReceiveTimeoutMs);
+      FSocket.SetSendTimeout(FParams.SendTimeoutMs);
       FSocket.Connect(FParams.Host, FParams.Port);
     except
       on E: Exception do
@@ -504,6 +518,17 @@ begin
     begin
       MarkBroken;
       raise;
+    end;
+    on E: ERedisTransportTimeout do
+    begin
+      // Estourou SO_RCVTIMEO/SO_SNDTIMEO. Invalida como qualquer outra falha,
+      // mas com a excecao propria: quem chamou precisa distinguir "o servidor
+      // caiu" de "o servidor esta lento demais" para decidir se aumenta o
+      // timeout ou se investiga o servidor. E a conexao vai embora nos dois
+      // casos, porque a resposta atrasada ainda pode chegar.
+      MarkBroken;
+      raise ERedisTimeout.CreateFmt('%s (host %s:%d)',
+        [E.Message, FParams.Host, FParams.Port]);
     end;
     on E: Exception do
     begin
@@ -741,6 +766,18 @@ begin
   // So' depois do OK: se o SELECT falhar, o banco corrente continua sendo o
   // anterior, e e' esse que a reconexao do M3 tem que replayar.
   FDatabase := ADatabase;
+end;
+
+procedure TRedisConnection.SetReceiveTimeout(AMilliseconds: Integer);
+begin
+  FLock.Enter;
+  try
+    FParams.ReceiveTimeoutMs := AMilliseconds;
+    if FSocket <> nil then
+      FSocket.SetReceiveTimeout(AMilliseconds);
+  finally
+    FLock.Leave;
+  end;
 end;
 
 function TRedisConnection.GetIsUsable: Boolean;

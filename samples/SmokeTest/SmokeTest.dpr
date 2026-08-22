@@ -32,10 +32,12 @@ uses
     {$ENDIF}
   {$ENDIF}
   SysUtils,
+  Redis.Threading,
   Redis.Transport,
   Redis.Types,
   Redis.Resp,
-  Redis.Connection;
+  Redis.Connection,
+  Redis.Pool;
 
 const
   HOST = 'localhost';
@@ -395,6 +397,98 @@ begin
 end;
 
 { ---------------------------------------------------------------------------
+  Read timeout: sem ele, um comando pendurado prende a conexao E a thread do
+  chamador para sempre — o Redis nao tem heartbeat para detectar isso.
+  --------------------------------------------------------------------------- }
+procedure ExercitaTimeout;
+var
+  LConn: TRedisConnection;
+  LParams: TRedisParams;
+  LInicio: UInt64;
+  LDecorrido: UInt64;
+  LPegou: Boolean;
+begin
+  Secao('read timeout');
+  LParams := Params;
+  LParams.ReceiveTimeoutMs := 300;
+  LConn := TRedisConnection.Create(LParams);
+  try
+    LConn.Open;
+    // BLPOP numa fila vazia espera ate' o timeout DELE (2 s); o do socket
+    // (300 ms) estoura antes.
+    LInicio := RedisTickMs;
+    LPegou := False;
+    try
+      LConn.Execute('BLPOP', [Chave('fila-vazia'), 2]);
+    except
+      on E: ERedisTimeout do
+        LPegou := True;
+    end;
+    LDecorrido := RedisTickMs - LInicio;
+    Passo('BLPOP alem do timeout levanta ERedisTimeout', LPegou,
+      ' -> ' + IntToStr(LDecorrido) + ' ms');
+    Passo('e desiste antes dos 2 s do comando', LDecorrido < 1500);
+    Passo('a conexao com resposta a caminho e invalidada',
+      LConn.IsBroken and (not LConn.IsUsable));
+  finally
+    LConn.Free;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------
+  Pool: empresta, reusa e descarta. E' o que a aplicacao segura de verdade —
+  nao ha' canal no Redis, a unidade de concorrencia e' a conexao.
+  --------------------------------------------------------------------------- }
+procedure ExercitaPool;
+var
+  LPool: TRedisPool;
+  LPoolParams: TRedisPoolParams;
+  LPrimeira, LSegunda: TRedisConnection;
+  LPegou: Boolean;
+begin
+  Secao('pool de conexoes');
+  LPoolParams := RedisDefaultPoolParams;
+  LPoolParams.MaxSize := 2;
+  LPoolParams.AcquireTimeoutMs := 200;
+  LPool := TRedisPool.Create(Params, LPoolParams);
+  try
+    LPrimeira := LPool.Acquire;
+    Passo('Acquire empresta uma conexao aberta', LPrimeira.IsOpen);
+    LPrimeira.Execute('SET', [Chave('pool'), 'ok']);
+    Passo('e o comando roda por ela',
+      LPrimeira.Execute('GET', [Chave('pool')]).AsString = 'ok');
+
+    LSegunda := LPool.Acquire;
+    Passo('o pool abre a segunda quando as duas sao usadas ao mesmo tempo',
+      (LSegunda <> nil) and (LPool.TotalCount = 2));
+
+    LPegou := False;
+    try
+      LPool.Acquire;  // no teto e sem ninguem para devolver
+    except
+      on E: ERedisPoolExhausted do
+        LPegou := True;
+    end;
+    Passo('no teto, Acquire desiste em vez de abrir socket sem limite', LPegou);
+
+    LPool.Release(LPrimeira);
+    Passo('Release devolve para o ocioso', LPool.IdleCount = 1);
+
+    LPrimeira := LPool.Acquire;
+    Passo('e a proxima ida reusa a ociosa, sem abrir outra',
+      LPool.CreatedCount = 2, ' -> ' + IntToStr(LPool.CreatedCount) + ' abertas');
+
+    LPrimeira.Execute('DEL', [Chave('pool')]);
+    LPool.Release(LPrimeira);
+    LPool.Release(LSegunda);
+    Passo('devolvidas as duas, nenhuma fica emprestada',
+      (LPool.InUseCount = 0) and (LPool.IdleCount = 2));
+  finally
+    LPool.Free;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------
   Invalidacao: conexao que perdeu o socket nao se conserta, nao reexecuta o
   comando em voo e recusa os proximos. E' a regra que o pool do M3 usa para
   decidir destruir em vez de devolver.
@@ -478,7 +572,7 @@ procedure Executa;
 var
   LConn: TRedisConnection;
 begin
-  WriteLn('pascal-redis-faa :: smoke test M2');
+  WriteLn('pascal-redis-faa :: smoke test M3');
   WriteLn('  alvo ......... ', HOST, ':', PORT);
   WriteLn('  compilador ... ', {$IFDEF FPC} 'FPC ' + {$I %FPCVERSION%} {$ELSE} 'Delphi' {$ENDIF});
   WriteLn('  backend TLS .. ', RedisTlsBackendName, ' (nao exercitado ate o M5)');
@@ -503,6 +597,8 @@ begin
     LConn.Free;
   end;
 
+  ExercitaTimeout;
+  ExercitaPool;
   ExercitaInvalidacao;
 end;
 

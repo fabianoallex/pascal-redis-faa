@@ -341,6 +341,101 @@ O mesmo construtor serve ao pool do M3 quando ele quiser injetar um transporte j
 
 ---
 
+## 22. Timeout não é fim de stream (M3)
+
+O transporte tinha `Connect/Receive/Send/Close` e mais nada — no AMQP isso bastava, porque o
+heartbeat detectava a morte do outro lado. O Redis não tem heartbeat: se o servidor emudecer
+no meio de uma resposta, a leitura fica parada para sempre, prendendo a conexão **e a thread
+que chamou** (que, pela decisão 2, é a thread da aplicação).
+
+Daí `SetReceiveTimeout`/`SetSendTimeout` (`SO_RCVTIMEO`/`SO_SNDTIMEO`). O detalhe que
+custaria uma tarde: o Windows quer um `DWORD` de milissegundos e o Unix quer um `timeval` —
+e passar a forma errada **não dá erro**, o `setsockopt` aceita e o timeout simplesmente não
+acontece, que é o pior desfecho possível para este código.
+
+Estourado o prazo, o socket levanta `ERedisTransportTimeout` em vez de devolver 0. A
+diferença importa: fim de stream significa "o servidor encerrou", e timeout significa "o
+servidor ainda pode responder, mas eu desisti". No segundo caso há uma resposta a caminho, e
+é por isso que a conexão é destruída em vez de reciclada.
+
+Os dois backends TLS rebaixam qualquer exceção a EOF (para o parser tratar como conexão
+encerrada); os dois foram ajustados para deixar **só** o timeout passar. Sem isso, um
+timeout sob TLS chegaria ao chamador disfarçado de "servidor encerrou".
+
+E há uma segunda armadilha, esta na RTL do Delphi: `TSocket.ReceiveTimeout` atribuído
+**antes** do `Connect` não chega ao socket. O `Connect` faz `FSocket := CreateSocket`, e é
+dentro do `CreateSocket` que a RTL aplica a opção — sobre `FSocket`, que ainda é
+`InvalidSocket` naquele ponto. Falha, o resultado é descartado, e como o setter já guardou o
+valor, reatribuí-lo depois não faz nada. O `ApplyTimeouts` só escreve a propriedade com a
+conexão de pé. O sintoma é traiçoeiro justamente porque o código compila igual nos dois
+compiladores e só o Delphi fica esperando o comando inteiro — foi assim que apareceu.
+
+---
+
+## 23. O pool descarta; não conserta (M3)
+
+Na devolução, o pool destrói a conexão em três casos: invalidada (erro de I/O, timeout,
+fluxo malformado), **suja** (sobrou byte no buffer — decisão 18) ou com o banco corrente
+diferente do configurado.
+
+O terceiro é o menos óbvio e o mais traiçoeiro. `SELECT` vive na conexão, não no servidor:
+reciclar uma conexão que ficou no banco 3 entregaria à próxima thread um banco diferente do
+que ela pediu, e o estrago — ler e gravar no lugar errado — apareceria muito longe da causa.
+
+Não existe "retomar" uma conexão morta no Redis: o socket foi embora com o comando em voo.
+O que o pool chama de reconexão é abrir uma conexão **nova**, e o handshake dela já replaya
+todo o estado que existia (`HELLO`/`AUTH`, `CLIENT SETNAME`, `SELECT`) — não há topologia no
+servidor para restaurar, ao contrário do AMQP. O comando que estava em voo continua não
+sendo repetido (decisão 4).
+
+---
+
+## 24. O que é rede não acontece sob o lock (M3)
+
+Sob o lock do pool só andam contador e lista. Abrir conexão, dar o PING de saúde e fechar
+socket acontecem fora dele.
+
+O motivo é direto: uma ida e volta de rede segurando o lock congelaria todas as outras
+threads pelo mesmo tempo — e o PING de saúde acontece justamente quando a rede está ruim,
+que é quando congelar todo mundo é pior.
+
+Isso obriga a uma sutileza: a vaga no `MaxSize` é reservada **antes** de soltar o lock, e
+devolvida se a conexão não abrir. Sem a reserva, N threads veriam o mesmo "ainda cabe uma" e
+o pool estouraria o teto; sem a devolução, cada falha de conexão encolheria o pool para
+sempre, e a aplicação só voltaria ao normal com restart.
+
+O health check em si é opt-out por tempo (`HealthCheckAfterIdleMs`): conexão que acabou de
+voltar não precisa de PING, conexão parada há meia hora precisa — quem derruba conexão
+ociosa é o servidor (timeout do lado de lá, failover, `CLIENT KILL`) e o cliente não é
+avisado.
+
+---
+
+## 25. O pool é testável sem rede, e o teste de conexão-suja é de integração (M3)
+
+`TRedisPool.CreateConnection` é `virtual` de propósito: as suítes unitárias sobrescrevem
+para devolver conexões sobre o servidor falso em memória. Com isso dá para testar teto,
+reuso, descarte, poda por ociosidade e health check reprovando — sem servidor e sem espera.
+
+Duas coisas, porém, **não** se testam com fake, e é por isso que existe `tests/Integration`:
+
+1. **Que o `SO_RCVTIMEO` foi mesmo aplicado.** Um servidor falso não tem socket, logo não
+   tem como estourar timeout de socket. O teste real manda um `BLPOP` de 2 s numa conexão
+   com timeout de 300 ms e exige que a desistência venha antes.
+2. **Que a conexão contaminada não volta.** Depois desse timeout, a resposta do `BLPOP` está
+   a caminho de verdade. Com `MaxSize = 1`, o pool é obrigado a reusar a única conexão que
+   tem — então, se ele não a destruísse, o `GET` seguinte leria a resposta atrasada do
+   `BLPOP` e a aplicação receberia, calada, o valor errado. É o bug clássico de cliente
+   Redis, reproduzido de propósito.
+
+Um detalhe que os testes de pool ensinaram: **não dá para verificar troca de conexão
+comparando ponteiros**. O gerenciador de memória costuma devolver exatamente o endereço do
+bloco recém-liberado, então `velha <> nova` falha mesmo quando a troca aconteceu — e ainda
+por cima lê um ponteiro morto. Quem atesta a troca são os contadores do pool
+(`CreatedCount`/`DiscardedCount`).
+
+---
+
 ## Compatibilidade e nomenclatura
 
 A lib fala RESP, não depende da implementação: funciona com **Redis**, **Valkey**, **KeyDB**

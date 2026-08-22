@@ -10,7 +10,7 @@
         <MainUnitHasScaledStatement Value="False"/>
       </Flags>
       <SessionStorage Value="InProjectDir"/>
-      <Title Value="RedisUnitTestsFpc"/>
+      <Title Value="RedisIntegrationTestsFpc"/>
       <UseAppBundle Value="False"/>
       <ResourceType Value="res"/>
     </General>
@@ -21,7 +21,7 @@
           <Version Value="11"/>
           <PathDelim Value="\"/>
           <Target>
-            <Filename Value="RedisUnitTestsFpc"/>
+            <Filename Value="RedisIntegrationTestsFpc"/>
           </Target>
           <SearchPaths>
             <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
@@ -70,23 +70,11 @@
     </RequiredPackages>
     <Units>
       <Unit>
-        <Filename Value="RedisUnitTestsFpc.lpr"/>
+        <Filename Value="RedisIntegrationTestsFpc.lpr"/>
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
-        <Filename Value="Redis.TypesTests.pas"/>
-        <IsPartOfProject Value="True"/>
-      </Unit>
-      <Unit>
-        <Filename Value="Redis.RespTests.pas"/>
-        <IsPartOfProject Value="True"/>
-      </Unit>
-      <Unit>
-        <Filename Value="Redis.ConnectionTests.pas"/>
-        <IsPartOfProject Value="True"/>
-      </Unit>
-      <Unit>
-        <Filename Value="Redis.PoolTests.pas"/>
+        <Filename Value="Redis.IntegrationTests.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>
     </Units>
@@ -95,7 +83,7 @@
     <Version Value="11"/>
     <PathDelim Value="\"/>
     <Target>
-      <Filename Value="RedisUnitTestsFpc"/>
+      <Filename Value="RedisIntegrationTestsFpc"/>
     </Target>
     <SearchPaths>
       <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>

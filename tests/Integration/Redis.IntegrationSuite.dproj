@@ -1,6 +1,6 @@
 ﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
     <PropertyGroup>
-        <ProjectGuid>{3C7A9E14-5B62-4D08-9F31-A6D48E20C7B5}</ProjectGuid>
+        <ProjectGuid>{7F42B0C9-1A65-4E37-B8D2-5C90E7A14F6B}</ProjectGuid>
         <ProjectVersion>20.1</ProjectVersion>
         <FrameworkType>None</FrameworkType>
         <Base>True</Base>
@@ -8,8 +8,8 @@
         <Platform Condition="'$(Platform)'==''">Win32</Platform>
         <TargetedPlatforms>693267</TargetedPlatforms>
         <AppType>Console</AppType>
-        <MainSource>Redis.UnitTests.dpr</MainSource>
-        <ProjectName Condition="'$(ProjectName)'==''">Redis.UnitTests</ProjectName>
+        <MainSource>Redis.IntegrationSuite.dpr</MainSource>
+        <ProjectName Condition="'$(ProjectName)'==''">Redis.IntegrationSuite</ProjectName>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
         <Base>true</Base>
@@ -75,7 +75,7 @@
         <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
         <DCC_UnitSearchPath>$(DUnitX);..\..\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
-        <SanitizedProjectName>Redis_UnitTests</SanitizedProjectName>
+        <SanitizedProjectName>Redis_IntegrationSuite</SanitizedProjectName>
         <UsingDelphiRTL>true</UsingDelphiRTL>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
@@ -124,14 +124,12 @@
         </DelphiCompile>
         <DCCReference Include="..\..\src\Redis.Types.pas"/>
         <DCCReference Include="..\..\src\Redis.Resp.pas"/>
+        <DCCReference Include="..\..\src\Redis.Threading.pas"/>
         <DCCReference Include="..\..\src\Redis.Transport.pas"/>
         <DCCReference Include="..\..\src\Redis.Connection.pas"/>
         <DCCReference Include="..\..\src\Redis.Pool.pas"/>
-        <DCCReference Include="Redis.DUnitXCompat.pas"/>
-        <DCCReference Include="Redis.TypesTests.pas"/>
-        <DCCReference Include="Redis.RespTests.pas"/>
-        <DCCReference Include="Redis.ConnectionTests.pas"/>
-        <DCCReference Include="Redis.PoolTests.pas"/>
+        <DCCReference Include="..\Unit\Redis.DUnitXCompat.pas"/>
+        <DCCReference Include="Redis.IntegrationTests.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>
@@ -154,7 +152,7 @@
         <BorlandProject>
             <Delphi.Personality>
                 <Source>
-                    <Source Name="MainSource">Redis.UnitTests.dpr</Source>
+                    <Source Name="MainSource">Redis.IntegrationSuite.dpr</Source>
                 </Source>
             </Delphi.Personality>
             <Platforms>

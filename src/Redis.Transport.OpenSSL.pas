@@ -639,10 +639,17 @@ begin
       end;
     end;
   except
-    // Igual SChannel: Read sinaliza EOF, nunca propaga exceção — nem ERedisTls
-    // nem um erro de socket do transporte (no Delphi, Receive pode levantar
-    // ESocketError em vez de devolver <= 0).
-    Exit(0);
+    // Timeout é a ÚNICA exceção que passa. Rebaixá-lo a EOF diria "o servidor
+    // encerrou" quando o que houve foi "eu desisti de esperar" — e a resposta
+    // atrasada ainda pode chegar, contaminando a conexão. Quem lê precisa
+    // dessa diferença para destruir a conexão em vez de reciclá-la.
+    on ERedisTransportTimeout do
+      raise;
+    // No resto, igual ao SChannel: Read sinaliza EOF, nunca propaga exceção —
+    // nem ERedisTls nem um erro de socket do transporte (no Delphi, Receive
+    // pode levantar ESocketError em vez de devolver <= 0).
+    else
+      Exit(0);
   end;
 end;
 

@@ -38,6 +38,10 @@
         <UnitName Value="Redis.Connection"/>
       </Item>
       <Item>
+        <Filename Value="..\src\Redis.Pool.pas"/>
+        <UnitName Value="Redis.Pool"/>
+      </Item>
+      <Item>
         <Filename Value="..\src\Redis.Transport.pas"/>
         <UnitName Value="Redis.Transport"/>
       </Item>

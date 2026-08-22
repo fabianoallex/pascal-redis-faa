@@ -67,16 +67,31 @@ manualmente para o outro.
 | `Redis.Transport.Tls` | `AMQP.Transport.Tls` | TLS via SChannel — só Windows (`REDIS_WINDOWS`, automático) |
 | `Redis.Transport.OpenSSL` | `AMQP.Transport.OpenSSL` | TLS via OpenSSL — qualquer plataforma, opt-in `-dREDIS_OPENSSL` |
 
-**Mudança pendente no transporte (fazer no M3):** `TRedisTcpSocket` só tem
-`Connect/Receive/Send/Close` — **não tem read timeout**. No AMQP isso bastava (o heartbeat
-detectava morte); no Redis não: um comando pendurado prende a conexão E a thread do
-chamador para sempre. Adicionar `SetReceiveTimeout`/`SetSendTimeout` (`SO_RCVTIMEO`/
-`SO_SNDTIMEO` via `setsockopt`, nos dois compiladores) e propagar o timeout até os dois
-backends TLS.
+**Mudança feita no transporte (M3, 2026-08-22):** `TRedisTcpSocket` ganhou
+`SetReceiveTimeout`/`SetSendTimeout` (`SO_RCVTIMEO`/`SO_SNDTIMEO`). No FPC via
+`fpsetsockopt` — DWORD de ms no Windows, `timeval` no Unix, que é a pegadinha da API; no
+Delphi pelas propriedades `ReceiveTimeout`/`SendTimeout` do `TSocket`, que já resolvem a
+diferença. Estourado o prazo, `Receive`/`Send` levantam **`ERedisTransportTimeout`** (nova,
+subclasse de `ERedisTransport`), que a `Redis.Connection` traduz para `ERedisTimeout`.
+Os dois backends TLS foram ajustados para **deixar essa exceção passar**: eles rebaixam
+qualquer erro a EOF, e rebaixar um timeout diria "o servidor encerrou" quando o que houve
+foi "eu desisti" — com a resposta ainda a caminho.
+
+**Armadilha do Delphi (custou uma rodada de teste):** `TSocket.ReceiveTimeout`/`SendTimeout`
+só valem se atribuídos com o socket **já conectado**. O `TSocket.Connect` faz
+`FSocket := CreateSocket`, e é dentro do `CreateSocket` que a RTL empurra os timeouts para o
+socket — usando o campo `FSocket`, que naquele instante ainda é `InvalidSocket`, porque só
+recebe o handle quando o `CreateSocket` retorna. O `setsockopt` vai para um handle inválido,
+falha, e a RTL descarta o resultado. Pior: o setter guarda o valor, então reatribuir o mesmo
+número depois vira no-op (`if FReceiveTimeout <> Value`) e não há segunda chance. Por isso o
+`ApplyTimeouts` só escreve a propriedade depois que `TSocketState.Connected` entra em
+`FSock.State`. **Sintoma:** FPC estoura o timeout certinho e o Delphi espera o comando
+inteiro (apareceu num `BLPOP` de 2 s com timeout de 300 ms).
 
 Aviso conhecido e **pré-existente** (idêntico na lib AMQP, não foi introduzido pelo porte):
-`Redis.Transport.Tls.pas(612)` e `Redis.Transport.OpenSSL.pas(712)` — "Function result does
-not seem to be set". Não perseguir.
+`Redis.Transport.Tls.pas(617)` e `Redis.Transport.OpenSSL.pas(719)` — "Function result does
+not seem to be set". Não perseguir. (As linhas andam quando as units são editadas; o que
+identifica o aviso é a mensagem, não o número.)
 
 ## Regras da codebase dual (Delphi + FPC 3.2.2)
 
@@ -135,7 +150,7 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
 
 ## Estrutura de units
 
-Existentes (M0 + M1 + M2):
+Existentes (M0 + M1 + M2 + M3):
 
 ```
 src/redis.inc
@@ -146,13 +161,13 @@ src/Redis.Transport.OpenSSL.pas  (cópia renomeada)
 src/Redis.Types.pas              TRedisReplyKind, IRedisReply, TRedisArg, excecoes, params, Utf8Encode/Decode
 src/Redis.Resp.pas               codec RESP2/RESP3: RedisEncodeCommand, TRedisReader, IRedisByteSource
 src/Redis.Connection.pas         TRedisConnection (1 socket, handshake, Execute/ExecuteRaw), TRedisPipeline, TRedisSocketStream
+src/Redis.Pool.pas               TRedisPool (Acquire/Release, descarte, health check, poda), TRedisPoolParams
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao
 `packages/pascal_redis_faa.pas`):
 
 ```
-src/Redis.Pool.pas                checkout/checkin, invalidacao, health check
 src/Redis.Client.pas              fachada + Execute generico
 src/Redis.Commands.Keys.pas       DEL EXPIRE TTL SCAN TYPE RENAME
 src/Redis.Commands.Strings.pas    GET SET INCR SETEX GETSET MSET
@@ -200,7 +215,14 @@ nunca bloqueia o usuário da lib.
   `Assert.AreEqual(string, string)` do DUnitX ignora caixa por padrão, o que enfraqueceria
   os testes em silêncio e só do lado Delphi). Ao mexer numa suíte, portar para a outra na
   mesma sessão; conferir com um `diff` das seções de implementation.
-- `tests/Integration` (a criar no M3): mesma estrutura dual, contra o Redis real.
+- **Suíte de integração (M3, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
+  `Redis.IntegrationSuite.dproj`) + `tests/Integration/fpc` (FPCUnit). **Precisa do
+  container de pé.** Mesma regra de paridade das unitárias — corpo idêntico, só as
+  fixtures mudam. Rodar as do FPC com
+  `lazbuild -B tests\Integration\fpc\RedisIntegrationTestsFpc.lpi` e depois
+  `tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain`.
+  O programa Delphi se chama `Redis.IntegrationSuite` porque a **unit** já se chama
+  `Redis.IntegrationTests` e o Delphi não aceita projeto e unit homônimos.
 
 ## Convenções gerais
 
@@ -278,10 +300,34 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
      `ServerId` ficam vazios nesse modo.
    - **`CreateOnStream`** adota um `TStream` pronto: é o que torna a conexão inteira
      testável sem rede (e o que o pool usará para injetar transporte).
-3. **M3 — Pool + timeouts + reconexão.** Inclui a adição de `SetReceiveTimeout` no
-   transporte (ver "Peças herdadas") e o descarte da conexão suja no checkin (a detecção
-   já existe desde o M2: `IsDirty`/`IsUsable`). Fecha com a suíte de integração contra o
-   Redis real, incluindo o teste de conexão-suja.
+3. ~~**M3 — Pool + timeouts + reconexão.**~~ **Concluído em 2026-08-22.**
+   `SetReceiveTimeout`/`SetSendTimeout` no transporte (ver "Peças herdadas"),
+   `ERedisTransportTimeout` → `ERedisTimeout` na conexão, `TRedisConnection.SetReceiveTimeout`
+   para os comandos bloqueantes do M4/M8, e `Redis.Pool` com `Acquire`/`Release`, descarte
+   de conexão inutilizável, health check por PING, poda por ociosidade e teto com espera.
+   **Validado nos DOIS compiladores** contra o container (2026-08-22): suíte de integração
+   **11/11**, SmokeTest **PASS nos 60 passos** e unitárias **196/196** (178 + 18 do pool),
+   com `Tests Leaked: 0` nas duas suítes DUnitX — inclusive na de integração, onde vazar
+   significaria conexão que ninguém fechou. O read timeout do Delphi só passou depois de
+   corrigir a armadilha do `TSocket` descrita em "Peças herdadas": na primeira rodada o FPC
+   estourava em 300 ms e o Delphi esperava os 2 s inteiros do `BLPOP`.
+
+   Decisões tomadas aqui (racional nas seções 22–25 de `docs/DECISOES.md`):
+   - **Timeout tem exceção própria** (`ERedisTransportTimeout` no transporte,
+     `ERedisTimeout` na conexão) e NÃO é rebaixado a fim de fluxo: "o servidor encerrou" e
+     "eu desisti de esperar" levam a decisões diferentes, e no segundo caso a resposta
+     ainda pode chegar.
+   - **O pool descarta em vez de consertar.** Conexão invalidada, suja ou com o banco
+     trocado é destruída no `Release`. Não existe "retomar" conexão no Redis: o que o pool
+     faz é abrir outra, e o handshake dela replaya `HELLO`/`AUTH`, `CLIENT SETNAME` e
+     `SELECT` — o comando em voo continua não sendo repetido.
+   - **Health check e criação acontecem FORA do lock do pool**; sob o lock só anda
+     contador e lista. Uma ida e volta de rede segurando o lock congelaria todas as
+     threads.
+   - **A vaga é reservada antes de soltar o lock** (e devolvida se a conexão não abrir),
+     senão N threads veriam o mesmo "cabe mais uma" e estourariam o `MaxSize`.
+   - **`CreateConnection` é `virtual`**: é o que torna a lógica do pool testável sem rede
+     (as suítes sobrescrevem para devolver conexões sobre o servidor falso).
 4. **M4 — Famílias Strings/Keys/Hashes/Lists/Sets/ZSets.** Integração por família.
 5. **M5 — TLS.** `UseTls`/`TlsVerifyPeer` nos params, SmokeTest `--tls` PASS nos dois
    backends (SChannel e OpenSSL).

@@ -1,13 +1,15 @@
-﻿program RedisUnitTestsFpc;
+﻿program RedisIntegrationTestsFpc;
 
-{ Runner FPCUnit dos testes unitarios (mesma cobertura do tests\Unit\*.pas
-  DUnitX/Delphi, portada para FPCUnit). Nao precisa de servidor Redis: o codec
-  e' testado sobre TRedisBytesSource, em memoria.
+{ Runner FPCUnit dos testes de INTEGRACAO (mesma cobertura do
+  tests\Integration\*.pas DUnitX/Delphi, portada para FPCUnit).
+
+  PRECISA de um Redis em localhost:6379 — suba com docker/docker-compose.yml
+  antes de rodar. Sem servidor, todos os testes falham por conexao recusada.
 
   Console (saida de texto), quando chamado com qualquer parametro:
-    .\RedisUnitTestsFpc.exe --all --format=plain
+    .\RedisIntegrationTestsFpc.exe --all --format=plain
   GUI (janela com arvore de testes + barra verde/vermelha), sem parametros:
-    .\RedisUnitTestsFpc.exe
+    .\RedisIntegrationTestsFpc.exe
   Fora do Windows roda sempre em modo console (sem LCL/widgetset). }
 
 {$mode delphi}{$H+}
@@ -20,18 +22,15 @@ uses
   Interfaces, Forms, GuiTestRunner,
   {$ENDIF}
   Classes, consoletestrunner, testregistry,
-  Redis.TypesTests,
-  Redis.RespTests,
-  Redis.ConnectionTests,
-  Redis.PoolTests;
+  Redis.IntegrationTests;
 
 var
   ConsoleApp: TTestRunner;
 begin
   // Console FPC puro (fora de app Lazarus): DefaultSystemCodePage nao e' UTF-8
-  // por padrao, entao os literais acentuados dos testes (RoundTrip_ComAcentos,
-  // Comando_ArgumentoComAcentos etc.) seriam transcodificados errado e a suite
-  // falharia por motivo que nao tem nada a ver com Redis. Ver CLAUDE.md.
+  // por padrao, entao os literais acentuados dos testes seriam transcodificados
+  // errado e a suite falharia por motivo alheio ao Redis — aqui o estrago seria
+  // pior, porque o valor errado iria PARA o servidor. Ver CLAUDE.md.
   SetMultiByteConversionCodePage(CP_UTF8);
 
   {$IFDEF MSWINDOWS}
@@ -49,7 +48,7 @@ begin
     ConsoleApp := TTestRunner.Create(nil);
     try
       ConsoleApp.Initialize;
-      ConsoleApp.Title := 'pascal-redis-faa - testes unitarios (FPCUnit)';
+      ConsoleApp.Title := 'pascal-redis-faa - testes de integracao (FPCUnit)';
       ConsoleApp.Run;
     finally
       ConsoleApp.Free;

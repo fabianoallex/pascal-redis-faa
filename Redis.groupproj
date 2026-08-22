@@ -9,6 +9,9 @@
         <Projects Include="tests\Unit\Redis.UnitTests.dproj">
             <Dependencies/>
         </Projects>
+        <Projects Include="tests\Integration\Redis.IntegrationSuite.dproj">
+            <Dependencies/>
+        </Projects>
     </ItemGroup>
     <ProjectExtensions>
         <Borland.Personality>Default.Personality.12</Borland.Personality>
@@ -35,17 +38,29 @@
     <Target Name="Redis_UnitTests:Make">
         <MSBuild Projects="tests\Unit\Redis.UnitTests.dproj" Targets="Make"/>
     </Target>
+    <Target Name="Redis_IntegrationSuite">
+        <MSBuild Projects="tests\Integration\Redis.IntegrationSuite.dproj"/>
+    </Target>
+    <Target Name="Redis_IntegrationSuite:Clean">
+        <MSBuild Projects="tests\Integration\Redis.IntegrationSuite.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="Redis_IntegrationSuite:Make">
+        <MSBuild Projects="tests\Integration\Redis.IntegrationSuite.dproj" Targets="Make"/>
+    </Target>
     <Target Name="Build">
         <CallTarget Targets="SmokeTest"/>
         <CallTarget Targets="Redis_UnitTests"/>
+        <CallTarget Targets="Redis_IntegrationSuite"/>
     </Target>
     <Target Name="Clean">
         <CallTarget Targets="SmokeTest:Clean"/>
         <CallTarget Targets="Redis_UnitTests:Clean"/>
+        <CallTarget Targets="Redis_IntegrationSuite:Clean"/>
     </Target>
     <Target Name="Make">
         <CallTarget Targets="SmokeTest:Make"/>
         <CallTarget Targets="Redis_UnitTests:Make"/>
+        <CallTarget Targets="Redis_IntegrationSuite:Make"/>
     </Target>
     <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
 </Project>

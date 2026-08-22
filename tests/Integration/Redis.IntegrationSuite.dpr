@@ -1,11 +1,17 @@
-﻿program Redis.UnitTests;
+﻿program Redis.IntegrationSuite;
 
-{ Runner DUnitX dos testes unitarios. Nao precisa de servidor Redis: o codec e'
-  exercitado sobre TRedisBytesSource, em memoria.
+{ Runner DUnitX dos testes de INTEGRACAO.
 
-  A suite irma em FPCUnit fica em tests\Unit\fpc — as duas tem a MESMA cobertura
-  e o corpo dos testes e' identico (o Redis.DUnitXCompat existe justamente para
-  isso). Toda mudanca de um lado vai para o outro na mesma sessao. }
+  PRECISA de um Redis em localhost:6379 — suba com docker/docker-compose.yml
+  antes de rodar. Sem servidor, todos os testes falham por conexao recusada.
+
+  A suite irma em FPCUnit fica em tests\Integration\fpc — as duas tem a MESMA
+  cobertura e o corpo dos testes e' identico (e' para isso que existe o
+  Redis.DUnitXCompat). Toda mudanca de um lado vai para o outro na mesma
+  sessao.
+
+  O nome do programa nao e' Redis.IntegrationTests porque ja' existe a UNIT com
+  esse nome, e Delphi nao aceita projeto e unit homonimos no mesmo escopo. }
 
 {$APPTYPE CONSOLE}
 {$STRONGLINKTYPES ON}
@@ -17,14 +23,12 @@ uses
   DUnitX.TestFramework,
   Redis.Types in '..\..\src\Redis.Types.pas',
   Redis.Resp in '..\..\src\Redis.Resp.pas',
+  Redis.Threading in '..\..\src\Redis.Threading.pas',
   Redis.Transport in '..\..\src\Redis.Transport.pas',
   Redis.Connection in '..\..\src\Redis.Connection.pas',
   Redis.Pool in '..\..\src\Redis.Pool.pas',
-  Redis.DUnitXCompat in 'Redis.DUnitXCompat.pas',
-  Redis.TypesTests in 'Redis.TypesTests.pas',
-  Redis.RespTests in 'Redis.RespTests.pas',
-  Redis.ConnectionTests in 'Redis.ConnectionTests.pas',
-  Redis.PoolTests in 'Redis.PoolTests.pas';
+  Redis.DUnitXCompat in '..\Unit\Redis.DUnitXCompat.pas',
+  Redis.IntegrationTests in 'Redis.IntegrationTests.pas';
 
 var
   runner: ITestRunner;
@@ -32,9 +36,8 @@ var
   logger: ITestLogger;
   nunitLogger: ITestLogger;
 begin
-  // A arvore de respostas e' toda por interface, entao um vazamento aqui
-  // significaria ciclo de referencia — coisa que o M1 nao pode deixar passar
-  // para o pool do M3, onde conexoes vao e voltam o tempo todo.
+  // Conexoes e sockets de verdade indo e voltando do pool: um vazamento aqui
+  // e' conexao que ninguem fechou, e o servidor sente isso antes do cliente.
   ReportMemoryLeaksOnShutdown := True;
   try
     TDUnitX.CheckCommandLine;

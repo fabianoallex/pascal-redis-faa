@@ -546,6 +546,11 @@ begin
     except
       on ERedisTls do
         Exit(0); // conexão caiu / EOF: sinaliza fim de stream ao parser
+      // ERedisTransportTimeout (do socket, quando há receive timeout) NÃO é
+      // capturado de propósito: rebaixá-lo a EOF diria "o servidor encerrou"
+      // quando o que houve foi "eu desisti de esperar", e a resposta atrasada
+      // ainda pode chegar. Quem lê precisa da diferença para destruir a
+      // conexão em vez de reciclá-la.
     end;
     if FPlainPos >= FPlainEnd then
       Exit(0); // EOF (close_notify)
