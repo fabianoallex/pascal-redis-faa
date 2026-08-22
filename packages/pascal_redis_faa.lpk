@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <PathDelim Value="\"/>
+    <Name Value="pascal_redis_faa"/>
+    <Author Value="Fabiano Arndt"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <PathDelim Value="\"/>
+      <SearchPaths>
+        <IncludeFiles Value="..\src"/>
+        <OtherUnitFiles Value="..\src"/>
+        <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Description Value="Cliente Redis (RESP2/RESP3) para FPC/Lazarus e Delphi, escrito do zero. Pool de conexoes, pipelining, transacoes, scripting, pub/sub, streams e TLS (SChannel no Windows; OpenSSL opt-in via -dREDIS_OPENSSL em qualquer plataforma)."/>
+    <License Value="MIT"/>
+    <Version Minor="1"/>
+    <Files>
+      <Item>
+        <Filename Value="..\src\redis.inc"/>
+        <Type Value="Include"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Threading.pas"/>
+        <UnitName Value="Redis.Threading"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Types.pas"/>
+        <UnitName Value="Redis.Types"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Resp.pas"/>
+        <UnitName Value="Redis.Resp"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Transport.pas"/>
+        <UnitName Value="Redis.Transport"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Transport.Tls.pas"/>
+        <UnitName Value="Redis.Transport.Tls"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Transport.OpenSSL.pas"/>
+        <UnitName Value="Redis.Transport.OpenSSL"/>
+      </Item>
+    </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="FCL"/>
+      </Item>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>

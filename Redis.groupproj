@@ -1,0 +1,51 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{B1D7C084-9E3A-4C62-A5F7-08D41B6E23CD}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="samples\SmokeTest\SmokeTest.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="tests\Unit\Redis.UnitTests.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="SmokeTest">
+        <MSBuild Projects="samples\SmokeTest\SmokeTest.dproj"/>
+    </Target>
+    <Target Name="SmokeTest:Clean">
+        <MSBuild Projects="samples\SmokeTest\SmokeTest.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="SmokeTest:Make">
+        <MSBuild Projects="samples\SmokeTest\SmokeTest.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Redis_UnitTests">
+        <MSBuild Projects="tests\Unit\Redis.UnitTests.dproj"/>
+    </Target>
+    <Target Name="Redis_UnitTests:Clean">
+        <MSBuild Projects="tests\Unit\Redis.UnitTests.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="Redis_UnitTests:Make">
+        <MSBuild Projects="tests\Unit\Redis.UnitTests.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="SmokeTest"/>
+        <CallTarget Targets="Redis_UnitTests"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="SmokeTest:Clean"/>
+        <CallTarget Targets="Redis_UnitTests:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="SmokeTest:Make"/>
+        <CallTarget Targets="Redis_UnitTests:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>

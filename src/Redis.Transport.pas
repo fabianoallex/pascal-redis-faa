@@ -1,0 +1,202 @@
+﻿unit Redis.Transport;
+
+{$I redis.inc}
+
+{ PROVENIENCIA: copia renomeada de AMQP.Transport.pas (projeto ../pascal-amqp-faa),
+  prefixos TRedis*/Redis*. Sem dependencia entre repositorios (mesmo padrao
+  de Pipes.Threading.pas na pascal-pipes-faa): correcao de bug de um lado
+  deve ser portada manualmente para o outro. }
+
+{ Socket TCP cliente com a mesma superficie nos dois compiladores.
+
+  TRedisTcpSocket esconde a diferenca de RTL:
+  - Delphi: System.Net.Socket (TSocket), mesma escolha da pascal-amqp-faa.
+  - FPC: ssockets (TInetSocket), que resolve DNS e conecta no construtor.
+
+  Contrato usado por Redis.Connection:
+  - Receive/Send bloqueantes; Receive devolve <= 0 em fim de stream/erro (o
+    parser RESP trata como conexao encerrada).
+  - Close e' thread-safe no sentido que importa aqui: chamado por OUTRA thread
+    (timeout/teardown/reconexao) para desbloquear um Receive pendente da thread
+    de leitura. No FPC usamos shutdown() — o handle so e' fechado no destrutor,
+    evitando corrida de reuso de FD; no Delphi TSocket.Close ja tem esse papel
+    (comportamento identico ao da pascal-amqp-faa). Close pode ser chamado mais
+    de uma vez. }
+
+interface
+
+uses
+  SysUtils,
+  Classes
+  {$IFDEF FPC}
+  , ssockets
+  {$ELSE}
+  , System.Net.Socket
+  {$ENDIF}
+  ;
+
+type
+  /// Erro de socket plain (conectar, enviar, receber) fora do TLS —
+  /// tipicamente host/porta inalcançável ou conexão derrubada pelo peer.
+  ERedisTransport = class(Exception);
+
+  { Erros da camada TLS (handshake, cifra, validação de cert). Declarada aqui —
+    e não nas units de transporte TLS — para existir em TODA plataforma/build:
+    Redis.Transport.Tls só compila sob REDIS_WINDOWS e Redis.Transport.OpenSSL só
+    sob REDIS_OPENSSL, mas testes e chamadores precisam capturar ERedisTls sem
+    depender dessas diretivas. Também é a exceção levantada por UseTls quando
+    nenhum backend TLS foi compilado (fora do Windows, sem -dREDIS_OPENSSL) —
+    a mensagem explica como habilitar. Nos backends reais: falha de
+    handshake, cert rejeitado (TlsVerifyPeer=True) ou libssl/libcrypto não
+    encontrada em runtime. }
+  ERedisTls = class(Exception);
+
+  TRedisTcpSocket = class
+  private
+    {$IFDEF FPC}
+    FSock: TInetSocket;
+    FShutdown: Boolean;
+    {$ELSE}
+    FSock: TSocket;
+    {$ENDIF}
+  public
+    constructor Create;
+    destructor Destroy; override;
+    /// Resolve o host e conecta (bloqueante). Levanta excecao em falha.
+    procedure Connect(const AHost: string; APort: Word);
+    /// Devolve os bytes lidos; 0 (ou negativo) = conexao encerrada.
+    function Receive(var Buffer; ACount: Integer): Integer;
+    function Send(const Buffer; ACount: Integer): Integer;
+    /// Encerra a conexao, desbloqueando um Receive pendente em outra thread.
+    procedure Close;
+  end;
+
+/// Backend TLS deste build (decidido em compilacao): 'OpenSSL', 'SChannel'
+/// ou 'nenhum'. Util para exibir em UI/log qual motor um build usa.
+function RedisTlsBackendName: string;
+
+/// Como RedisTlsBackendName, mas com o detalhe de runtime quando o backend ja
+/// carregou — o OpenSSL publica versao e biblioteca na 1ª conexao TLS (ex.:
+/// 'OpenSSL 3.5.2 ... (libssl-3.dll)'). Antes disso, devolve so o nome.
+function RedisTlsBackendInfo: string;
+
+/// Uso interno dos backends TLS: publica o detalhe de RedisTlsBackendInfo.
+procedure RedisSetTlsBackendDetail(const ADetail: string);
+
+implementation
+
+{$IFDEF FPC}
+uses
+  sockets;
+
+const
+  REDIS_SHUT_RDWR = 2;
+{$ENDIF}
+
+var
+  // Escrito uma vez pelo backend ao carregar (antes de qualquer leitura util:
+  // so ha detalhe DEPOIS de uma conexao TLS abrir).
+  GTlsBackendDetail: string = '';
+
+function RedisTlsBackendName: string;
+begin
+  {$IFDEF REDIS_OPENSSL}
+  Result := 'OpenSSL';
+  {$ELSE}
+    {$IFDEF REDIS_WINDOWS}
+  Result := 'SChannel';
+    {$ELSE}
+  Result := 'nenhum';
+    {$ENDIF}
+  {$ENDIF}
+end;
+
+function RedisTlsBackendInfo: string;
+begin
+  Result := GTlsBackendDetail;
+  if Result = '' then
+    Result := RedisTlsBackendName;
+end;
+
+procedure RedisSetTlsBackendDetail(const ADetail: string);
+begin
+  GTlsBackendDetail := ADetail;
+end;
+
+constructor TRedisTcpSocket.Create;
+begin
+  inherited Create;
+  {$IFNDEF FPC}
+  FSock := TSocket.Create(TSocketType.TCP);
+  {$ENDIF}
+end;
+
+destructor TRedisTcpSocket.Destroy;
+begin
+  try
+    Close;
+  except
+  end;
+  FSock.Free;
+  inherited;
+end;
+
+procedure TRedisTcpSocket.Connect(const AHost: string; APort: Word);
+begin
+  {$IFDEF FPC}
+  FSock := TInetSocket.Create(AHost, APort); // conecta no construtor
+  {$ELSE}
+  FSock.Connect(AHost, '', '', APort);
+  {$ENDIF}
+end;
+
+function TRedisTcpSocket.Receive(var Buffer; ACount: Integer): Integer;
+begin
+  if FSock = nil then
+    Exit(0);
+  {$IFDEF FPC}
+  Result := FSock.Read(Buffer, ACount);
+  {$ELSE}
+  Result := FSock.Receive(Buffer, ACount);
+  {$ENDIF}
+end;
+
+function TRedisTcpSocket.Send(const Buffer; ACount: Integer): Integer;
+begin
+  if FSock = nil then
+    raise ERedisTransport.Create('socket nao conectado');
+  {$IF Defined(FPC) and Defined(UNIX) and Declared(MSG_NOSIGNAL)}
+  // MSG_NOSIGNAL: send() num socket ja encerrado devolve erro (EPIPE) em vez
+  // de matar o processo com SIGPIPE. Essencial pro TLS: o destrutor do stream
+  // manda close_notify best-effort mesmo quando o socket ja foi derrubado
+  // (teardown/reconexao) — no Windows isso e' so um erro de send engolido;
+  // no Linux, sem esta flag, era SIGPIPE fatal (visto no smoke test --tls).
+  // Vale pra qualquer Unix cuja unit sockets declare a flag (Linux, BSDs);
+  // no Darwin (sem MSG_NOSIGNAL) fica o caminho comum, sujeito a SIGPIPE.
+  Result := fpsend(FSock.Handle, @Buffer, ACount, MSG_NOSIGNAL);
+  {$ELSE}
+    {$IFDEF FPC}
+  Result := FSock.Write(Buffer, ACount);
+    {$ELSE}
+  Result := FSock.Send(Buffer, ACount);
+    {$ENDIF}
+  {$ENDIF}
+end;
+
+procedure TRedisTcpSocket.Close;
+begin
+  if FSock = nil then
+    Exit;
+  {$IFDEF FPC}
+  if not FShutdown then
+  begin
+    FShutdown := True;
+    fpshutdown(FSock.Handle, REDIS_SHUT_RDWR);
+  end;
+  {$ELSE}
+  if TSocketState.Connected in FSock.State then
+    FSock.Close;
+  {$ENDIF}
+end;
+
+end.

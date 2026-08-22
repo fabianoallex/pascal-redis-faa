@@ -1,0 +1,17 @@
+# Redis de desenvolvimento para o SmokeTest e as suites de integracao.
+#
+#   docker compose up -d
+#   docker compose exec redis redis-cli ping   -> PONG
+#
+# Sem senha e sem TLS de proposito: este e' o caminho "plain" que o SmokeTest
+# exercita por padrao. Para TLS, combine com docker-compose.tls.yml.
+#
+# A imagem e' o Redis 7.2 (ultima release sob BSD-3). Trocar por valkey/valkey
+# ou por redis:8 e' suportado: a lib fala RESP, nao depende da implementacao.
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: pascal-redis-faa-redis
+    ports:
+      - "6379:6379"   # protocolo RESP (o que a lib usa)
+    command: ["redis-server", "--appendonly", "no", "--save", ""]

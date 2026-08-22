@@ -1,0 +1,36 @@
+# saidas de compilacao
+build/
+lib/
+backup/
+*.exe
+*.o
+*.a
+*.ppu
+*.rsj
+*.compiled
+*.dcu
+Win32/
+Win64/
+linux/
+
+# recurso .res gerado pelo IDE (icone padrao) - regeneravel
+*.res
+
+# binarios ELF (sem extensao) gerados por lazbuild em Linux no proprio diretorio
+samples/SmokeTest/SmokeTest
+tests/Unit/fpc/RedisUnitTestsFpc
+
+# certificados do servidor TLS de dev (gerar localmente; ver docker/certs/README.md)
+docker/certs/*.crt
+docker/certs/*.key
+
+# relatorio NUnit gerado pelo runner DUnitX
+dunitx-results.xml
+
+# arquivos de sessao/IDE
+*.lps
+*.local
+*.identcache
+*.stat
+__history/
+__recovery/

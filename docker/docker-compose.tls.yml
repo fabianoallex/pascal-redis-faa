@@ -1,0 +1,41 @@
+# Override que ADICIONA TLS (6380) ao servico do docker-compose.yml, sem altera-lo.
+#
+# 1) Gere os certificados self-signed (a partir da pasta docker/). O `chmod 644`
+#    na chave e' ESSENCIAL: o openssl gera a chave como 600/root e o redis roda
+#    como uid 999 -- sem o chmod o servidor aborta ao ler o keyfile.
+#      New-Item -ItemType Directory -Force certs | Out-Null
+#      docker run --rm -v "${PWD}/certs:/certs" alpine/openssl req -x509 -newkey rsa:2048 -nodes -keyout /certs/server.key -out /certs/server.crt -days 3650 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
+#      docker run --rm -v "${PWD}/certs:/certs" alpine chmod 644 /certs/server.key
+#
+# 2) Suba combinando os dois arquivos:
+#      docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# Mantem o listener plain (6379) e adiciona o TLS (6380), para o SmokeTest poder
+# validar os dois caminhos contra o MESMO servidor -- inclusive o cenario de
+# handshake TLS contra porta plain, que deve falhar com ERedisTls.
+#
+# Certs sao de dev/descartaveis -- nao commite ./certs/.
+services:
+  redis:
+    ports:
+      - "6380:6380"   # RESP sobre TLS
+    volumes:
+      - ./certs:/certs:ro
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --port
+      - "6379"
+      - --tls-port
+      - "6380"
+      - --tls-cert-file
+      - /certs/server.crt
+      - --tls-key-file
+      - /certs/server.key
+      - --tls-ca-cert-file
+      - /certs/server.crt
+      - --tls-auth-clients
+      - "no"
