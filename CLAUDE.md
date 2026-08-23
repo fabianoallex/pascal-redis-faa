@@ -236,7 +236,8 @@ nunca bloqueia o usuário da lib.
 - **SmokeTest com TLS (M5):** `SmokeTest.exe --tls` roda a bateria INTEIRA contra o
   listener cifrado (6380) em vez do de texto claro, e acrescenta a seção de TLS —
   135 passos contra os 126 do modo plain. Desde o M7 ele vale ainda mais: pub/sub é o
-  único caso em que uma thread lê e outra escreve no mesmo envelope TLS ao mesmo tempo. Precisa dos certs e do override de pé:
+  único caso em que uma thread lê e outra escreve no mesmo envelope TLS ao mesmo tempo.
+  Precisa dos certs e do override de pé:
   `docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`. Rode nos
   **dois backends**: build normal (SChannel) e `--build-mode=openssl` (OpenSSL).
   Qualquer argumento que não seja `--tls` é recusado com exit code 2 — um `--tsl`
@@ -251,7 +252,11 @@ nunca bloqueia o usuário da lib.
   além: o servidor falso dela **responde** (interpreta o `SUBSCRIBE` e devolve a
   confirmação), porque sem diálogo não dá para testar confirmação, ordem de mensagens nem
   queda de conexão. Ele também desiste da leitura depois de 10 s — trava de segurança para
-  que um teste mal escrito não pendure a suíte na thread de leitura. Rodar as do FPC com
+  que um teste mal escrito não pendure a suíte na thread de leitura. **Esse é o padrão a
+  reusar sempre que o teste depender de diálogo** e não de resposta roteirizada (o M8 vai
+  precisar dele para `XREADGROUP`/`XACK`): o fake interpreta o que o cliente escreveu,
+  mantém o estado mínimo do servidor e responde — e a leitura BLOQUEIA quando não há nada,
+  como um socket em silêncio. Rodar as do FPC com
   `lazbuild -B tests\Unit\fpc\RedisUnitTestsFpc.lpi` e depois
   `tests\Unit\fpc\RedisUnitTestsFpc.exe --all --format=plain` (sem parâmetros abre a GUI).
   As do Delphi só pelo IDE, via `Redis.groupproj`.
@@ -262,13 +267,22 @@ nunca bloqueia o usuário da lib.
   `Assert.AreEqual(string, string)` do DUnitX ignora caixa por padrão, o que enfraqueceria
   os testes em silêncio e só do lado Delphi). Ao mexer numa suíte, portar para a outra na
   mesma sessão; conferir com um `diff` das seções de implementation.
+  **A tradução é mecânica, então faça por script em vez de à mão** (foi assim que a
+  `Redis.PubSubTests` nasceu nos dois lados, no M7): escreva o arquivo DUnitX e derive o
+  gêmeo FPCUnit trocando (a) o cabeçalho, que cita o caminho da suíte irmã, (b) o `uses`
+  — `fpcunit, testregistry, SysUtils, Classes, ...` no lugar de
+  `DUnitX.TestFramework, System.*, ..., Redis.DUnitXCompat` —, (c) `[TestFixture] X = class`
+  + `public` por `X = class(TTestCase)` + `published`, removendo os prefixos `[Test] `, e
+  (d) `TDUnitX.RegisterTestFixture(X)` por `RegisterTest(X)`. Acrescente `{$mode delphi}{$H+}`
+  antes do `interface`. Depois um `diff` dos dois arquivos tem de mostrar **só** essas
+  quatro coisas — é a prova barata de que a cobertura não divergiu.
 - **Suíte de integração (M3–M7, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
   `Redis.IntegrationSuite.dproj`) + `tests/Integration/fpc` (FPCUnit). **Precisa do
   container de pé.** O M4 acrescentou uma fixture por família, mais a do
   `TRedisClient`; o M7, a de pub/sub — que inclui o teste de **reconexão** (derruba a
   conexão do assinante com `CLIENT KILL ID` e confere que as assinaturas voltaram, pelo
-  `PUBSUB NUMSUB` do servidor, não pela contabilidade do cliente). Mesma regra de paridade das unitárias — corpo idêntico, só as
-  fixtures mudam. Rodar as do FPC com
+  `PUBSUB NUMSUB` do servidor, não pela contabilidade do cliente). Mesma regra de
+  paridade das unitárias — corpo idêntico, só as fixtures mudam. Rodar as do FPC com
   `lazbuild -B tests\Integration\fpc\RedisIntegrationTestsFpc.lpi` e depois
   `tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain`.
   O programa Delphi se chama `Redis.IntegrationSuite` porque a **unit** já se chama
@@ -282,6 +296,14 @@ português, **sem pushes/commits automáticos sem confirmação explícita do us
 O README tem duas versões: `README.md` (português, **canônico**) e `README.en.md` (inglês,
 com identificadores/comentários dos exemplos traduzidos). **Toda mudança no README.md deve
 ser replicada no README.en.md na mesma sessão.**
+
+**Fim de linha: LF**, no working tree e no repositório, em tudo — fontes, `.lpi`/`.lpk`,
+`.dproj`, markdown. O `core.autocrlf` desta máquina está em `true` e o git avisa que
+"LF will be replaced by CRLF"; o aviso é inofensivo e **não é convite para converter
+nada**. Ferramenta que reescreve arquivo (script de edição em massa, sobretudo) tem de
+preservar LF: converter para CRLF marca o arquivo inteiro como alterado para quem
+comparar working trees, e não traz benefício nenhum — tanto o FPC quanto o Delphi 12 leem
+LF sem reclamar.
 
 ## Roadmap
 
