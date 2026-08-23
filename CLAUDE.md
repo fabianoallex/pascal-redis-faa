@@ -208,12 +208,18 @@ nunca bloqueia o usuário da lib.
   o pacote inteiro (cache de `.ppu` único).
 - **Delphi:** Community Edition **não compila por linha de comando** — validar abrindo
   `Redis.groupproj` no IDE.
-- **Delphi com OpenSSL:** não há build configuration pronta (o `--build-mode=openssl` é do
-  Lazarus). Acrescente `REDIS_OPENSSL` em Project → Options → Building → Delphi Compiler →
-  *Conditional defines*, compile, rode, e **tire a diretiva depois**. Em projeto Win32 a
-  lista de sonames tenta `libcrypto-3-x64.dll` primeiro, falha (processo 32-bit não carrega
-  DLL x64) e cai para `libcrypto-3.dll` — que o Windows acha em `SysWOW64`. O fallback é o
-  que faz isso funcionar sem instalar nada.
+- **Delphi com OpenSSL:** os três `.dproj` já trazem a build configuration **`OpenSSL`**
+  (`Cfg_3`, filha de Debug, com `REDIS_OPENSSL` no `DCC_Define`) — é a irmã do build mode
+  `openssl` do Lazarus. Selecione-a no Project Manager e compile; **não** acrescente a
+  diretiva à mão em Conditional defines, porque ela cairia na configuração *Debug* e a
+  partir daí todo build "normal" usaria OpenSSL em silêncio. Em projeto Win32 a lista de
+  sonames tenta `libcrypto-3-x64.dll` primeiro, falha (processo 32-bit não carrega DLL x64)
+  e cai para `libcrypto-3.dll` — que o Windows acha em `SysWOW64`. O fallback é o que faz
+  isso funcionar sem instalar nada.
+- **O IDE do Delphi reescreve o `.dproj` ao trocar de configuração**, gravando a
+  configuração ativa em `<Config Condition="'$(Config)'==''">`. Isso é estado local: não
+  commite. Antes de fechar, volte a configuração para `Debug`, ou descarte o arquivo com
+  `git checkout -- <proj>.dproj`.
 - **Servidor de teste:** `docker/docker-compose.yml` (redis:7.2-alpine, porta 6379) e o
   override `docker-compose.tls.yml` (6380, precisa dos certs de `docker/certs`).
   **Rode o SmokeTest após qualquer mudança na lib.**
