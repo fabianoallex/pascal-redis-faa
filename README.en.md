@@ -743,6 +743,47 @@ Three things to try on screen:
   else already took the lock, the renewal fails on its own and the screen
   unchecks the checkbox.
 
+### `FilaTarefasVcl`
+
+Durable work queue with a stream + consumer group: `XADD` produces,
+`XREADGROUP BLOCK` consumes, `XACK` confirms. It is the only Redis type with
+reliable delivery — a message published with no subscriber around evaporates
+in pub/sub, but here it stays recorded, and the group tracks who received it
+until someone confirms.
+
+```
+cd samples\FilaTarefasVcl
+lazbuild FilaTarefasVcl.lpi
+FilaTarefasVcl.exe
+```
+
+Four things to try on screen:
+
+- **The pending-entry trap.** "Matar" (Kill) makes the consumer receive the
+  next task and stop without confirming it — like a process dying mid-work.
+  The task stays in its PEL forever, until "Reivindicar (XAUTOCLAIM)"
+  transfers it to the "recuperador" consumer, which processes and confirms
+  it.
+- **The deleted-entry trap — and a finding from validating against the real
+  server.** "Apagar a última tarefa abandonada (XDEL)" removes the entry from
+  the *stream*, but not from the PEL. On Redis 7+, `XAUTOCLAIM`/`XCLAIM`
+  **purge it from the PEL by themselves** once they see it is gone from the
+  stream — they never hand it back as `IsDeleted`. What actually shows
+  `TRedisStreamEntry.IsDeleted` is "Retomar minha PEL" (the same consumer
+  re-reading its own PEL with `XREADGROUP ... 0`): the entry arrives with no
+  fields, and all that is left to do is confirm it.
+- **One vs. two consumers.** "Consumidor A" and "Consumidor B" are
+  independent — turn on just one to watch the queue pile up with nobody
+  around to reclaim what it abandons, or both to watch the work split between
+  them while the survivor keeps going and the dead one's task sits pending.
+- **A consumer as a persistent loop.** Unlike the other samples, each
+  consumer is a loop running on a `RedisPool` worker — it blocks on
+  `XReadGroupBlocking`, wakes up with a task or a timeout, and repeats until
+  turned off. Every round trip to the server has its own
+  `UsarCliente`/`SoltarCliente` pair, never one covering the whole loop —
+  that is what lets you disconnect with a consumer running without waiting
+  for the whole loop to die first.
+
 ## License
 
 MIT — Copyright (c) 2026 Fabiano Arndt. See `LICENSE`.

@@ -18,6 +18,11 @@
           <Mode Name="Default"/>
         </BuildModes>
       </Target>
+      <Target FileName="samples\FilaTarefasVcl\FilaTarefasVcl.lpi">
+        <BuildModes>
+          <Mode Name="Default"/>
+        </BuildModes>
+      </Target>
       <Target FileName="tests\Unit\fpc\RedisUnitTestsFpc.lpi">
         <BuildModes>
           <Mode Name="Default"/>

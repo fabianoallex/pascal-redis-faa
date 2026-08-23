@@ -12,6 +12,9 @@
         <Projects Include="samples\LockDistribuidoVcl\LockDistribuidoVcl.dproj">
             <Dependencies/>
         </Projects>
+        <Projects Include="samples\FilaTarefasVcl\FilaTarefasVcl.dproj">
+            <Dependencies/>
+        </Projects>
         <Projects Include="tests\Unit\Redis.UnitTests.dproj">
             <Dependencies/>
         </Projects>
@@ -53,6 +56,15 @@
     <Target Name="LockDistribuidoVcl:Make">
         <MSBuild Projects="samples\LockDistribuidoVcl\LockDistribuidoVcl.dproj" Targets="Make"/>
     </Target>
+    <Target Name="FilaTarefasVcl">
+        <MSBuild Projects="samples\FilaTarefasVcl\FilaTarefasVcl.dproj"/>
+    </Target>
+    <Target Name="FilaTarefasVcl:Clean">
+        <MSBuild Projects="samples\FilaTarefasVcl\FilaTarefasVcl.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="FilaTarefasVcl:Make">
+        <MSBuild Projects="samples\FilaTarefasVcl\FilaTarefasVcl.dproj" Targets="Make"/>
+    </Target>
     <Target Name="Redis_UnitTests">
         <MSBuild Projects="tests\Unit\Redis.UnitTests.dproj"/>
     </Target>
@@ -75,6 +87,7 @@
         <CallTarget Targets="SmokeTest"/>
         <CallTarget Targets="CacheAsideVcl"/>
         <CallTarget Targets="LockDistribuidoVcl"/>
+        <CallTarget Targets="FilaTarefasVcl"/>
         <CallTarget Targets="Redis_UnitTests"/>
         <CallTarget Targets="Redis_IntegrationSuite"/>
     </Target>
@@ -82,6 +95,7 @@
         <CallTarget Targets="SmokeTest:Clean"/>
         <CallTarget Targets="CacheAsideVcl:Clean"/>
         <CallTarget Targets="LockDistribuidoVcl:Clean"/>
+        <CallTarget Targets="FilaTarefasVcl:Clean"/>
         <CallTarget Targets="Redis_UnitTests:Clean"/>
         <CallTarget Targets="Redis_IntegrationSuite:Clean"/>
     </Target>
@@ -89,6 +103,7 @@
         <CallTarget Targets="SmokeTest:Make"/>
         <CallTarget Targets="CacheAsideVcl:Make"/>
         <CallTarget Targets="LockDistribuidoVcl:Make"/>
+        <CallTarget Targets="FilaTarefasVcl:Make"/>
         <CallTarget Targets="Redis_UnitTests:Make"/>
         <CallTarget Targets="Redis_IntegrationSuite:Make"/>
     </Target>

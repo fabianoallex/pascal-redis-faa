@@ -1,0 +1,431 @@
+object frmFilaTarefas: TfrmFilaTarefas
+  Left = 0
+  Height = 830
+  Top = 0
+  Width = 780
+  Caption = 'Fila de tarefas com Streams  -  pascal-redis-faa'
+  ClientHeight = 830
+  ClientWidth = 780
+  Font.Height = -12
+  Font.Name = 'Segoe UI'
+  Position = poScreenCenter
+  OnCloseQuery = FormCloseQuery
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  LCLVersion = '4.0.0.0'
+  object gbConexao: TGroupBox
+    Left = 8
+    Height = 80
+    Top = 8
+    Width = 764
+    Caption = ' Conexão '
+    ClientHeight = 60
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 0
+    object lblHost: TLabel
+      Left = 16
+      Height = 15
+      Top = 15
+      Width = 26
+      Caption = 'Host'
+      ParentColor = False
+    end
+    object lblPorta: TLabel
+      Left = 200
+      Height = 15
+      Top = 15
+      Width = 31
+      Caption = 'Porta'
+      ParentColor = False
+    end
+    object lblSenha: TLabel
+      Left = 306
+      Height = 15
+      Top = 15
+      Width = 36
+      Caption = 'Senha'
+      ParentColor = False
+    end
+    object lblDb: TLabel
+      Left = 468
+      Height = 15
+      Top = 15
+      Width = 17
+      Caption = 'DB'
+      ParentColor = False
+    end
+    object lblStatus: TLabel
+      Left = 16
+      Height = 15
+      Top = 40
+      Width = 70
+      Caption = 'Desconectado.'
+      ParentColor = False
+    end
+    object edtHost: TEdit
+      Left = 50
+      Height = 23
+      Top = 11
+      Width = 140
+      TabOrder = 0
+      Text = 'localhost'
+    end
+    object edtPorta: TEdit
+      Left = 237
+      Height = 23
+      Top = 11
+      Width = 60
+      TabOrder = 1
+      Text = '6379'
+    end
+    object edtSenha: TEdit
+      Left = 348
+      Height = 23
+      Top = 11
+      Width = 110
+      EchoMode = emPassword
+      PasswordChar = '*'
+      TabOrder = 2
+    end
+    object edtDb: TEdit
+      Left = 491
+      Height = 23
+      Top = 11
+      Width = 45
+      TabOrder = 3
+      Text = '0'
+    end
+    object chkTls: TCheckBox
+      Left = 548
+      Height = 19
+      Top = 13
+      Width = 40
+      Caption = 'TLS'
+      OnClick = chkTlsClick
+      TabOrder = 4
+    end
+    object btnConectar: TButton
+      Left = 610
+      Height = 25
+      Top = 9
+      Width = 72
+      Caption = 'Conectar'
+      OnClick = btnConectarClick
+      TabOrder = 5
+    end
+    object btnDesconectar: TButton
+      Left = 688
+      Height = 25
+      Top = 9
+      Width = 72
+      Caption = 'Desconectar'
+      OnClick = btnDesconectarClick
+      TabOrder = 6
+    end
+  end
+  object gbFila: TGroupBox
+    Left = 8
+    Height = 110
+    Top = 94
+    Width = 764
+    Caption = ' Fila (stream + grupo consumidor) '
+    ClientHeight = 90
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 1
+    object lblFila: TLabel
+      Left = 16
+      Height = 15
+      Top = 15
+      Width = 22
+      Caption = 'Fila'
+      ParentColor = False
+    end
+    object lblFilaInfo: TLabel
+      Left = 16
+      Height = 15
+      Top = 44
+      Width = 730
+      Caption = 'Crie a fila antes de ligar os consumidores -- senao XREADGROUP falha com NOGROUP.'
+      ParentColor = False
+    end
+    object lblTamanho: TLabel
+      Left = 16
+      Height = 15
+      Top = 70
+      Width = 116
+      Caption = 'Tamanho do stream: -'
+      ParentColor = False
+    end
+    object lblPendencias: TLabel
+      Left = 230
+      Height = 15
+      Top = 70
+      Width = 128
+      Caption = 'Pendencias no grupo: -'
+      ParentColor = False
+    end
+    object edtFila: TEdit
+      Left = 64
+      Height = 23
+      Top = 11
+      Width = 160
+      TabOrder = 0
+      Text = 'pedidos'
+    end
+    object btnCriarFila: TButton
+      Left = 240
+      Height = 25
+      Top = 9
+      Width = 190
+      Caption = 'Criar fila (XGROUP CREATE)'
+      OnClick = btnCriarFilaClick
+      TabOrder = 1
+    end
+  end
+  object gbProducao: TGroupBox
+    Left = 8
+    Height = 70
+    Top = 210
+    Width = 764
+    Caption = ' Produção de tarefas (XADD) '
+    ClientHeight = 50
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 2
+    object lblPayload: TLabel
+      Left = 16
+      Height = 15
+      Top = 15
+      Width = 55
+      Caption = 'Descrição'
+      ParentColor = False
+    end
+    object edtPayload: TEdit
+      Left = 112
+      Height = 23
+      Top = 11
+      Width = 160
+      TabOrder = 0
+      Text = 'pedido'
+    end
+    object btnAdicionar: TButton
+      Left = 284
+      Height = 25
+      Top = 9
+      Width = 140
+      Caption = 'Adicionar tarefa'
+      OnClick = btnAdicionarClick
+      TabOrder = 1
+    end
+    object btnAdicionar5: TButton
+      Left = 434
+      Height = 25
+      Top = 9
+      Width = 170
+      Caption = 'Adicionar 5 tarefas'
+      OnClick = btnAdicionar5Click
+      TabOrder = 2
+    end
+  end
+  object gbConsumidorA: TGroupBox
+    Left = 8
+    Height = 90
+    Top = 286
+    Width = 764
+    Caption = ' Consumidor A (XREADGROUP BLOCK) '
+    ClientHeight = 70
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 3
+    object lblAtrasoA: TLabel
+      Left = 120
+      Height = 15
+      Top = 17
+      Width = 158
+      Caption = 'Tempo de processamento (ms)'
+      ParentColor = False
+    end
+    object lblStatusA: TLabel
+      Left = 16
+      Height = 15
+      Top = 47
+      Width = 78
+      Caption = 'Status: parado'
+      ParentColor = False
+    end
+    object chkLigadoA: TCheckBox
+      Left = 16
+      Height = 19
+      Top = 15
+      Width = 78
+      Caption = 'Ligado'
+      OnClick = chkLigadoAClick
+      TabOrder = 0
+    end
+    object edtAtrasoA: TEdit
+      Left = 284
+      Height = 23
+      Top = 13
+      Width = 60
+      TabOrder = 1
+      Text = '1000'
+    end
+    object btnMatarA: TButton
+      Left = 360
+      Height = 25
+      Top = 12
+      Width = 280
+      Caption = 'Matar (nao confirma a proxima tarefa)'
+      OnClick = btnMatarAClick
+      TabOrder = 2
+    end
+  end
+  object gbConsumidorB: TGroupBox
+    Left = 8
+    Height = 90
+    Top = 382
+    Width = 764
+    Caption = ' Consumidor B (XREADGROUP BLOCK) '
+    ClientHeight = 70
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 4
+    object lblAtrasoB: TLabel
+      Left = 120
+      Height = 15
+      Top = 17
+      Width = 158
+      Caption = 'Tempo de processamento (ms)'
+      ParentColor = False
+    end
+    object lblStatusB: TLabel
+      Left = 16
+      Height = 15
+      Top = 47
+      Width = 78
+      Caption = 'Status: parado'
+      ParentColor = False
+    end
+    object chkLigadoB: TCheckBox
+      Left = 16
+      Height = 19
+      Top = 15
+      Width = 78
+      Caption = 'Ligado'
+      OnClick = chkLigadoBClick
+      TabOrder = 0
+    end
+    object edtAtrasoB: TEdit
+      Left = 284
+      Height = 23
+      Top = 13
+      Width = 60
+      TabOrder = 1
+      Text = '1000'
+    end
+    object btnMatarB: TButton
+      Left = 360
+      Height = 25
+      Top = 12
+      Width = 280
+      Caption = 'Matar (nao confirma a proxima tarefa)'
+      OnClick = btnMatarBClick
+      TabOrder = 2
+    end
+  end
+  object gbRecuperacao: TGroupBox
+    Left = 8
+    Height = 130
+    Top = 478
+    Width = 764
+    Caption = ' Recuperação de pendências (armadilhas) '
+    ClientHeight = 110
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 5
+    object lblIdleMin: TLabel
+      Left = 16
+      Height = 15
+      Top = 15
+      Width = 148
+      Caption = 'Ocioso ha pelo menos (ms)'
+      ParentColor = False
+    end
+    object lblArmadilha: TLabel
+      Left = 16
+      Height = 15
+      Top = 78
+      Width = 730
+      Caption = 'XAUTOCLAIM (Redis 7+) purga sozinho a pendência já apagada do stream; para ver IsDeleted de verdade, use Retomar (mesmo consumidor relê a própria PEL).'
+      ParentColor = False
+    end
+    object edtIdleMin: TEdit
+      Left = 190
+      Height = 23
+      Top = 11
+      Width = 70
+      TabOrder = 0
+      Text = '3000'
+    end
+    object btnReivindicar: TButton
+      Left = 280
+      Height = 25
+      Top = 9
+      Width = 230
+      Caption = 'Reivindicar pendencias (XAUTOCLAIM)'
+      OnClick = btnReivindicarClick
+      TabOrder = 1
+    end
+    object btnRetomar: TButton
+      Left = 16
+      Height = 25
+      Top = 42
+      Width = 280
+      Caption = 'Retomar minha PEL (mesmo consumidor)'
+      OnClick = btnRetomarClick
+      TabOrder = 2
+    end
+    object btnApagarAbandonada: TButton
+      Left = 310
+      Height = 25
+      Top = 42
+      Width = 280
+      Caption = 'Apagar ultima abandonada (XDEL)'
+      OnClick = btnApagarAbandonadaClick
+      TabOrder = 3
+    end
+  end
+  object mmLog: TMemo
+    Left = 8
+    Height = 170
+    Top = 614
+    Width = 764
+    Anchors = [akTop, akLeft, akRight, akBottom]
+    Font.Height = -12
+    Font.Name = 'Consolas'
+    ParentFont = False
+    ReadOnly = True
+    ScrollBars = ssVertical
+    TabOrder = 6
+    WordWrap = False
+  end
+  object btnLimpar: TButton
+    Left = 8
+    Height = 25
+    Top = 792
+    Width = 100
+    Anchors = [akLeft, akBottom]
+    Caption = 'Limpar log'
+    OnClick = btnLimparClick
+    TabOrder = 7
+  end
+  object tmrAmostra: TTimer
+    Enabled = False
+    Interval = 700
+    OnTimer = tmrAmostraTimer
+    Left = 700
+    Top = 790
+  end
+end

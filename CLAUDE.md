@@ -662,6 +662,42 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    convenções gerais. **Validação no Delphi 12 pela IDE ainda não foi feita** — fica para o
    usuário, como de praxe (a Community Edition não compila por linha de comando).
 
+   **Sample 3 concluído em 2026-08-23** (validação FPC) — `samples/FilaTarefasVcl`, também
+   copiado do esqueleto do `CacheAsideVcl`. Exercita `XAdd`, `XGroupTryCreate`,
+   `XReadGroupBlocking`, `XAck`, `XAutoClaim` e `XReadGroup` com `'0'`. A novidade de
+   threading: cada consumidor é um **laço persistente** num worker do `RedisPool` (fica
+   bloqueado em `XReadGroupBlocking`, acorda com tarefa ou timeout, repete até ser
+   desligado), não uma operação avulsa — e cada ida ao servidor tem seu PRÓPRIO
+   `UsarCliente`/`SoltarCliente`, nunca um só cobrindo o laço inteiro. É o que faz
+   desconectar com um consumidor ligado esperar só a chamada corrente (no máximo
+   `BLOCK_MS`), e não o laço inteiro.
+
+   **Achado ao validar contra o servidor de verdade, que mudou o desenho da armadilha 2:**
+   o plano original era mostrar `TRedisStreamEntry.IsDeleted` reivindicando pelo
+   `XAUTOCLAIM` uma entrada apagada do stream por `XDEL`. Testado contra o container
+   (Redis 7.2.16) via `redis-cli` isolado antes de mexer no sample, isso **não acontece**:
+   no Redis 7+, `XAUTOCLAIM`/`XCLAIM` **purgam sozinhos** da PEL a entrada que já não
+   existe mais no stream, e a reportam na TERCEIRA parte da resposta (`ADeletedIds`) —
+   nunca no array principal com campos nulos. `IsDeleted` só aparece pra quem rele' a
+   própria PEL direto (`XREADGROUP` com `'0'`, sem passar por `XCLAIM`/`XAUTOCLAIM`), que é
+   exatamente o que o teste de integração do M8 (`EntradaApagada_ContinuaNaPelSemCampos`)
+   já fazia — só que ele nunca chama `XAutoClaim`, e por isso a divergência não apareceu antes.
+   Por causa disso o sample ganhou **dois** botões de recuperação, e não um: "Reivindicar
+   (XAUTOCLAIM)" (usa o overload de 3 saídas, mostra a purga automática do Redis 7+ e
+   dispensa `XACK` na entrada purgada) e "Retomar minha PEL" (mesmo consumidor, `XREADGROUP
+   '0'`, é quem de fato mostra `IsDeleted = True`). Vale como lembrete do valor de testar
+   contra o servidor ANTES de escrever a UI em vez de só depois: a suposição errada teria
+   virado uma armadilha documentada errado no README.
+
+   **Validado no FPC/LCL** com `lazbuild` limpo e a mesma bateria de mensagens Win32 cruas
+   do sample 2, conferindo **no servidor** via `redis-cli`/`XPENDING`/`XINFO GROUPS`: `XADD`
+   grava e os workers dividem o trabalho quando os dois estão ligados (`entries-read` bate
+   com o total, `pending` volta a 0); "Matar" deixa exatamente uma pendência na PEL do
+   consumidor certo; "Reivindicar" confirma a pendência normal e, na apagada, purga sem
+   `XACK`; "Retomar" mostra a entrada apagada chegando `IsDeleted` de verdade; e a variação
+   um × dois consumidores foi validada com os dois ligados ao mesmo tempo dividindo seis
+   tarefas. **Validação no Delphi 12 pela IDE ainda não foi feita** — fica para o usuário.
+
    **Caixa de vazamento é o `Tests Leaked: 0` dos samples.** O `.dpr` liga
    `ReportMemoryLeaksOnShutdown` só no Delphi, então fechar a janela em silêncio é a prova
    de que cliente, marshals e work items foram todos liberados — inclusive no caminho de

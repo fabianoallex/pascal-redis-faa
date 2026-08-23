@@ -728,6 +728,46 @@ Três coisas para experimentar na tela:
   mantém a posse sem deixar o prazo estourar. Se alguém já tomou o lock, a
   renovação falha sozinha e a tela desmarca o checkbox.
 
+### `FilaTarefasVcl`
+
+Fila de trabalho durável com stream + consumer group: `XADD` produz,
+`XREADGROUP BLOCK` consome, `XACK` confirma. É o único tipo do Redis com
+entrega confiável — mensagem publicada sem assinante no ar evapora no
+pub/sub, mas aqui fica gravada, e o grupo registra quem recebeu até alguém
+confirmar.
+
+```
+cd samples\FilaTarefasVcl
+lazbuild FilaTarefasVcl.lpi
+FilaTarefasVcl.exe
+```
+
+Quatro coisas para experimentar na tela:
+
+- **A armadilha da pendência.** "Matar" faz o consumidor receber a próxima
+  tarefa e parar sem confirmar — como um processo que morre no meio do
+  trabalho. A tarefa fica na PEL dele para sempre, até "Reivindicar
+  (XAUTOCLAIM)" transferi-la para o consumidor "recuperador", que processa e
+  confirma.
+- **A armadilha da entrada apagada — e um achado ao validar contra o
+  servidor.** "Apagar a última tarefa abandonada (XDEL)" tira a entrada do
+  *stream*, mas não da PEL. No Redis 7+, `XAUTOCLAIM`/`XCLAIM` **purgam
+  sozinhos** da PEL a entrada que já não existe mais no stream — sem nunca
+  devolvê-la como `IsDeleted`. Quem mostra `TRedisStreamEntry.IsDeleted` de
+  verdade é "Retomar minha PEL" (mesmo consumidor relendo a própria PEL com
+  `XREADGROUP ... 0`): a entrada chega sem campos, e só resta confirmar.
+- **Variação um × dois consumidores.** "Consumidor A" e "Consumidor B" são
+  independentes: ligue só um para ver a fila se acumular sem ninguém
+  reivindicar o que ele abandonar, ou os dois para ver o trabalho se repartir
+  e o sobrevivente seguir enquanto o morto fica pendente.
+- **Consumidor como laço persistente.** Ao contrário dos outros samples, cada
+  consumidor é um laço rodando num worker do `RedisPool` — fica bloqueado em
+  `XReadGroupBlocking`, acorda com uma tarefa ou o timeout, e repete até ser
+  desligado. Cada ida ao servidor tem seu próprio par
+  `UsarCliente`/`SoltarCliente`, nunca um só cobrindo o laço inteiro — é o que
+  permite desconectar com um consumidor ligado sem esperar o laço inteiro
+  morrer.
+
 ## Licença
 
 MIT — Copyright (c) 2026 Fabiano Arndt. Ver `LICENSE`.
