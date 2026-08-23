@@ -18,6 +18,7 @@ uses
   Redis.Types in '..\..\src\Redis.Types.pas',
   Redis.Resp in '..\..\src\Redis.Resp.pas',
   Redis.Transport in '..\..\src\Redis.Transport.pas',
+  Redis.Transport.Tls in '..\..\src\Redis.Transport.Tls.pas',
   Redis.Connection in '..\..\src\Redis.Connection.pas',
   Redis.Pool in '..\..\src\Redis.Pool.pas',
   Redis.Commands in '..\..\src\Redis.Commands.pas',

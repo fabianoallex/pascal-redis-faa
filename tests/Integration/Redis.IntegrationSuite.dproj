@@ -126,6 +126,7 @@
         <DCCReference Include="..\..\src\Redis.Resp.pas"/>
         <DCCReference Include="..\..\src\Redis.Threading.pas"/>
         <DCCReference Include="..\..\src\Redis.Transport.pas"/>
+        <DCCReference Include="..\..\src\Redis.Transport.Tls.pas"/>
         <DCCReference Include="..\..\src\Redis.Connection.pas"/>
         <DCCReference Include="..\..\src\Redis.Pool.pas"/>
         <DCCReference Include="..\..\src\Redis.Commands.pas"/>

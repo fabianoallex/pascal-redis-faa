@@ -310,7 +310,7 @@ begin
     SetLength(FCipher, FCipherLen + RAW_CHUNK);
   LRead := FUnderlying.Read(FCipher[FCipherLen], RAW_CHUNK);
   if LRead <= 0 then
-    raise ERedisTls.Create('conexão fechada durante TLS');
+    raise ERedisTls.Create('conexao fechada durante TLS');
   Inc(FCipherLen, LRead);
 end;
 
@@ -489,7 +489,7 @@ begin
 
     if StatusIs(LStatus, SEC_I_RENEGOTIATE) then
       // RabbitMQ não renegocia; não suportado nesta versão.
-      raise ERedisTls.Create('renegociação TLS solicitada pelo servidor não suportada');
+      raise ERedisTls.Create('renegociacao TLS solicitada pelo servidor nao suportada');
 
     if not StatusIs(LStatus, SEC_E_OK) then
       raise ERedisTls.CreateFmt('DecryptMessage falhou (0x%.8x)', [Cardinal(LStatus)]);
@@ -616,7 +616,7 @@ end;
 
 function TRedisSchannelStream.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
 begin
-  raise ERedisTls.Create('TRedisSchannelStream não suporta Seek');
+  raise ERedisTls.Create('TRedisSchannelStream nao suporta Seek');
 end;
 
 procedure TRedisSchannelStream.ShutdownTls;

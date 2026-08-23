@@ -22,6 +22,7 @@ uses
   Redis.Types,
   Redis.Resp,
   Redis.Connection,
+  Redis.Transport,
   Redis.DUnitXCompat;
 
 type
@@ -124,6 +125,15 @@ type
     [Test] procedure Pipeline_Vazio_NaoVaiAoServidor;
     [Test] procedure Pipeline_RespostaFaltando_LevantaEInvalida;
     [Test] procedure Pipeline_NaoDeixaResto_ConexaoContinuaLimpa;
+  end;
+
+  [TestFixture]
+  TRedisTlsTests = class
+  public
+    [Test] procedure DefaultTlsParams_TrocaAPortaELigaOTls;
+    [Test] procedure DefaultTlsParams_MantemAVerificacaoLigada;
+    [Test] procedure BackendTlsDesteBuild_SeIdentifica;
+    [Test] procedure ConexaoAdotada_IgnoraUseTls;
   end;
 
 implementation
@@ -1213,10 +1223,75 @@ begin
   end;
 end;
 
+{ TRedisTlsTests }
+
+procedure TRedisTlsTests.DefaultTlsParams_TrocaAPortaELigaOTls;
+var
+  LTls: TRedisParams;
+begin
+  LTls := RedisDefaultTlsParams;
+  // A porta anda JUNTO com o TLS porque o Redis nao faz upgrade em banda: nao
+  // existe STARTTLS, o listener cifrado e' outro. Ligar UseTls e esquecer a
+  // porta manda um ClientHello para o listener de texto claro.
+  TAssert.AssertEquals(Integer(REDIS_DEFAULT_TLS_PORT), Integer(LTls.Port));
+  TAssert.AssertTrue('UseTls ligado', LTls.UseTls);
+  // O resto continua sendo o default: quem chama ajusta so' o que precisa.
+  TAssert.AssertEquals('localhost', LTls.Host);
+  TAssert.AssertEquals(REDIS_DEFAULT_DATABASE, LTls.Database);
+end;
+
+procedure TRedisTlsTests.DefaultTlsParams_MantemAVerificacaoLigada;
+begin
+  // Este teste existe para travar uma decisao, nao para conferir um valor:
+  // a lib NAO oferece um atalho que ja' venha com a validacao do certificado
+  // desligada. Aceitar qualquer certificado anula a defesa contra
+  // man-in-the-middle, entao tem de ser uma linha explicita de quem escolheu —
+  // e aparecer no diff dessa pessoa.
+  TAssert.AssertTrue('TlsVerifyPeer continua True',
+    RedisDefaultTlsParams.TlsVerifyPeer);
+end;
+
+procedure TRedisTlsTests.BackendTlsDesteBuild_SeIdentifica;
+var
+  LNome: string;
+begin
+  LNome := RedisTlsBackendName;
+  TAssert.AssertTrue('o build declara um backend', LNome <> '');
+  // O Info acrescenta o detalhe de runtime quando ha' (versao e biblioteca
+  // carregada, no OpenSSL); sem detalhe, repete o nome. Nos dois casos o nome
+  // esta' dentro dele.
+  TAssert.AssertTrue('e o Info carrega o nome dentro',
+    Pos(LNome, RedisTlsBackendInfo) > 0);
+end;
+
+procedure TRedisTlsTests.ConexaoAdotada_IgnoraUseTls;
+var
+  LFake: TRedisFakeServerStream;
+  LConn: TRedisConnection;
+  LParams: TRedisParams;
+begin
+  // Stream adotado JA' e' o transporte pronto — quem o injetou decidiu o que
+  // ha' embaixo. Cifrar por cima seria TLS dentro de TLS, e o servidor falso
+  // (que nao fala TLS) nem chegaria a responder. E' o que mantem as suites
+  // unitarias rodando sem rede mesmo com UseTls nos parametros.
+  LParams := RedisDefaultParams;
+  LParams.UseTls := True;
+  LConn := NovaConexao(LFake, ['+PONG' + CRLF], LParams);
+  try
+    LConn.Open;
+    TAssert.AssertTrue('abriu sobre o stream adotado', LConn.IsOpen);
+    TAssert.AssertTrue('e falou RESP em texto claro', LConn.Ping);
+    TAssert.AssertEquals(Wire(['PING']), LFake.WrittenText);
+  finally
+    LConn.Free;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TRedisPipelineTests);
   TDUnitX.RegisterTestFixture(TRedisHandshakeTests);
   TDUnitX.RegisterTestFixture(TRedisExecuteTests);
   TDUnitX.RegisterTestFixture(TRedisConnectionPipelineTests);
+  TDUnitX.RegisterTestFixture(TRedisTlsTests);
 
 end.

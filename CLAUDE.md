@@ -88,6 +88,14 @@ número depois vira no-op (`if FReceiveTimeout <> Value`) e não há segunda cha
 `FSock.State`. **Sintoma:** FPC estoura o timeout certinho e o Delphi espera o comando
 inteiro (apareceu num `BLPOP` de 2 s com timeout de 300 ms).
 
+**Divergência introduzida no M5 (2026-08-22):** as oito mensagens de erro com
+acentuação nas duas units de TLS viraram ASCII (`validacao`, `conexao`, `nao`,
+`renegociacao`...). Motivo: app console FPC puro imprime UTF-8 num console
+cp850, e a mensagem que o usuário mais precisa ler — "validação do certificado
+falhou" — saía ilegível justo no momento da falha. É o mesmo motivo pelo qual as
+units escritas neste projeto já evitam acento em literal. **Se for portar
+correção para a `pascal-amqp-faa`, esta diferença é intencional.**
+
 Aviso conhecido e **pré-existente** (idêntico na lib AMQP, não foi introduzido pelo porte):
 `Redis.Transport.Tls.pas(617)` e `Redis.Transport.OpenSSL.pas(719)` — "Function result does
 not seem to be set". Não perseguir. (As linhas andam quando as units são editadas; o que
@@ -200,9 +208,24 @@ nunca bloqueia o usuário da lib.
   o pacote inteiro (cache de `.ppu` único).
 - **Delphi:** Community Edition **não compila por linha de comando** — validar abrindo
   `Redis.groupproj` no IDE.
+- **Delphi com OpenSSL:** não há build configuration pronta (o `--build-mode=openssl` é do
+  Lazarus). Acrescente `REDIS_OPENSSL` em Project → Options → Building → Delphi Compiler →
+  *Conditional defines*, compile, rode, e **tire a diretiva depois**. Em projeto Win32 a
+  lista de sonames tenta `libcrypto-3-x64.dll` primeiro, falha (processo 32-bit não carrega
+  DLL x64) e cai para `libcrypto-3.dll` — que o Windows acha em `SysWOW64`. O fallback é o
+  que faz isso funcionar sem instalar nada.
 - **Servidor de teste:** `docker/docker-compose.yml` (redis:7.2-alpine, porta 6379) e o
   override `docker-compose.tls.yml` (6380, precisa dos certs de `docker/certs`).
   **Rode o SmokeTest após qualquer mudança na lib.**
+- **SmokeTest com TLS (M5):** `SmokeTest.exe --tls` roda a bateria INTEIRA contra o
+  listener cifrado (6380) em vez do de texto claro, e acrescenta a seção de TLS —
+  99 passos contra os 90 do modo plain. Precisa dos certs e do override de pé:
+  `docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`. Rode nos
+  **dois backends**: build normal (SChannel) e `--build-mode=openssl` (OpenSSL).
+  Qualquer argumento que não seja `--tls` é recusado com exit code 2 — um `--tsl`
+  digitado errado rodaria em texto claro com cara de sucesso.
+- **TLS fica FORA da suíte de integração**, de propósito: ela precisa valer com só o
+  `docker-compose.yml` de pé, sem certs. Quem exercita TLS é o SmokeTest.
 - **Suítes unitárias (M1–M4, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
   (FPCUnit). Não precisam de servidor — a `Redis.ConnectionTests` sobe a conexão inteira
   sobre um servidor falso em memória (`TRedisConnection.CreateOnStream`), e a
@@ -364,8 +387,39 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    - **`WITHSCORES` muda de forma entre RESP2 (lista achatada) e RESP3 (lista de pares)**,
      e quem absorve é `RedisReplyToScoreMembers`, decidindo pela forma do primeiro item.
      Achatar isso no leitor estragaria os outros arrays de arrays.
-5. **M5 — TLS.** `UseTls`/`TlsVerifyPeer` nos params, SmokeTest `--tls` PASS nos dois
-   backends (SChannel e OpenSSL).
+5. ~~**M5 — TLS.**~~ **Concluído em 2026-08-23.** `UseTls`/`TlsVerifyPeer` ligados de
+   verdade na `Redis.Connection` (o socket ganha um envelope `TRedisSchannelStream` ou
+   `TRedisOpenSslStream` e o codec continua lendo de um `TStream`), `RedisDefaultTlsParams`
+   e o argumento `--tls` do SmokeTest. **Validado nas QUATRO combinações** de compilador x
+   backend contra o container com o override TLS (2026-08-22/23): SmokeTest **PASS nos 99
+   passos com `--tls`** e **90 sem**, em FPC+SChannel, FPC+OpenSSL 3.2.4, Delphi+SChannel e
+   Delphi+OpenSSL 3.5.2; unitárias **305/305** (301 + 4 do M5) e integração **34/34**, com
+   `Tests Leaked: 0` nas duas suítes DUnitX.
+
+   As duas units de transporte TLS estavam no repo desde o M0 sem nunca terem aberto um
+   handshake — e a `Redis.Transport.OpenSSL` nunca tinha sido **compilada** pelo Delphi,
+   porque nenhum projeto daqui definia a diretiva. O M5 é onde as quatro células da matriz
+   ficaram verdes pela primeira vez.
+
+   Decisões tomadas aqui (racional nas seções 31–33 de `docs/DECISOES.md`):
+   - **TLS não é upgrade em banda: é outra porta.** Não existe `STARTTLS` no Redis, então
+     `UseTls` anda junto com a porta — daí o `RedisDefaultTlsParams`, que muda as duas
+     coisas de uma vez.
+   - **Handshake TLS contra porta plain vira `ERedisTimeout`, não erro de cripto.** O
+     servidor lê o ClientHello como comando inline e nunca responde; quem desata o nó é o
+     `SO_RCVTIMEO` do M3. A mensagem **nomeia a troca de porta** como causa provável,
+     porque a pista natural (certificado) leva ao lugar errado.
+   - **O caso simétrico — plain contra porta TLS — NÃO é detectado no `Open`**, e é
+     escolha: em RESP2 sem senha/nome/banco o handshake não emite byte nenhum. Detectar
+     custaria um `PING` em toda conexão do pool.
+   - **A escolha insegura precisa de uma linha explícita.** `RedisDefaultTlsParams` mantém
+     `TlsVerifyPeer := True`; não há atalho que já venha com a validação desligada. Tem
+     teste unitário dedicado a travar isso.
+   - **Backend escolhido em COMPILAÇÃO** (`REDIS_OPENSSL` > `REDIS_WINDOWS`), nunca em
+     runtime; build sem backend levanta `ERedisTls` em vez de cair para texto claro.
+   - **Stream adotado (`CreateOnStream`) ignora `UseTls`**: ele já É o transporte pronto, e
+     cifrar por cima seria TLS dentro de TLS. É o que mantém as suítes unitárias rodando
+     sem rede mesmo com `UseTls` nos parâmetros.
 6. **M6 — `MULTI`/`EXEC`/`WATCH` + `EVAL` com cache de SHA** (o pipeline já saiu no M2).
 7. **M7 — Pub/Sub (RESP2) + RESP3 opt-in via `HELLO 3`.**
 8. **M8 — Streams + consumer groups.** Fecha o v1.

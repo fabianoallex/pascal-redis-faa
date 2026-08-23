@@ -3,12 +3,12 @@
 A **Redis** client (RESP2/RESP3 protocol) for **Free Pascal/Lazarus and Delphi**,
 from a single codebase, written from scratch. MIT licensed.
 
-> **Status: under construction (M4 — command families).** You can already connect,
-> authenticate, run **any** Redis command, use pipelining, work through a connection pool
-> with real timeouts and call the Keys, Strings, Hashes, Lists, Sets and ZSets commands
-> through the typed facade — blocking ones included — over RESP2 or RESP3. Still missing:
-> TLS (M5), transactions and scripting (M6), pub/sub (M7) and streams (M8). The full
-> roadmap lives in `CLAUDE.md` (Portuguese).
+> **Status: under construction (M5 — TLS).** You can already connect, authenticate, run
+> **any** Redis command, use pipelining, work through a connection pool with real
+> timeouts, call the Keys, Strings, Hashes, Lists, Sets and ZSets commands through the
+> typed facade — blocking ones included — over RESP2 or RESP3, and encrypt all of it with
+> TLS. Still missing: transactions and scripting (M6), pub/sub (M7) and streams (M8). The
+> full roadmap lives in `CLAUDE.md` (Portuguese).
 
 Sibling of [`pascal-amqp-faa`](../pascal-amqp-faa) (AMQP 0-9-1 client) and
 `pascal-pipes-faa` (IPC), under the same rules: dual codebase for FPC 3.2.2 and
@@ -256,6 +256,64 @@ never raises on a server error (any item may be an error).
 Application code does not change — an `HGETALL` has the same shape under both protocols,
 because the RESP3 map is stored flattened.
 
+### TLS
+
+The backend is picked at **compile time**, never at runtime — a client that tries one
+engine and falls back to another ends up running, on the user's machine, a backend that
+was never the one under test:
+
+| Build | Backend | Where |
+|---|---|---|
+| default | SChannel (SSPI) | Windows only, no DLL to ship |
+| `-dREDIS_OPENSSL` | OpenSSL (libssl/libcrypto) | any platform, loaded dynamically |
+| neither | — | `UseTls` raises `ERedisTls` explaining how to enable one |
+
+`RedisTlsBackendName` tells you which engine this build carries;
+`RedisTlsBackendInfo` adds the runtime detail only OpenSSL can give — version and the
+path of the library it actually loaded, which is what settles the day a machine has three
+OpenSSL installs and the wrong one won.
+
+```pascal
+uses
+  Redis.Types, Redis.Client;
+
+var
+  LParams: TRedisParams;
+begin
+  LParams := RedisDefaultTlsParams;   // port 6380 AND UseTls, in one go
+  LParams.TlsVerifyPeer := False;     // development only (self-signed cert)
+
+  LClient := TRedisClient.Create(LParams);
+```
+
+**Redis TLS is not an in-band upgrade.** There is no `STARTTLS`: the server opens a
+separate listener (`--tls-port`), and a connection is either born encrypted or not at all.
+That is why `RedisDefaultTlsParams` changes the port *together with* `UseTls` — setting
+one without the other sends a ClientHello to the plaintext listener, which reads it as an
+inline command and never answers. What saves you there is the read timeout, and the
+library raises `ERedisTimeout` **naming the port swap** as the likely cause: the natural
+hunch is to go looking at the certificate, and the mistake is the port number.
+
+**`TlsVerifyPeer := False` accepts any certificate** — it keeps the channel encrypted and
+throws away the defence against man-in-the-middle. The library offers no shortcut that
+comes with verification already off: `RedisDefaultTlsParams` keeps `TlsVerifyPeer := True`,
+and whoever needs to lower it writes the line above. That is deliberate — the decision then
+shows up in the diff of the person who made it and in an auditor's `grep`, instead of
+riding into production hidden behind a friendly function name.
+
+To exercise it against the development server, generate the certs (see
+`docker/certs/README.md`), bring the override up and run the encrypted smoke test:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+SmokeTest.exe --tls
+```
+
+`--tls` is not a mode with half a dozen extra steps: the **whole** battery starts running
+on top of the encryption, which is where a badly built TLS envelope shows up — a 512 KB
+bulk spanning several TLS records, a pipeline in a single write, a socket timeout in the
+middle of a record.
+
 ## Build
 
 **FPC (command line):**
@@ -300,6 +358,10 @@ per-family command battery against the real server — including a `BLPOP` whose
 longer than the read timeout, and the proof that `HGETALL` and `ZRANGE WITHSCORES` return
 the same result over RESP2 and RESP3.
 
+**TLS is deliberately left out of this suite:** it has to pass with only
+`docker-compose.yml` up, with no certificates at all. TLS is exercised by the smoke test,
+via `--tls`.
+
 ```
 lazbuild -B tests\Integration\fpc\RedisIntegrationTestsFpc.lpi
 tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain
@@ -320,10 +382,17 @@ Needs the container up (previous section).
 ```
 cd samples\SmokeTest
 lazbuild SmokeTest.lpi
-SmokeTest.exe
+SmokeTest.exe          # 90 steps, plaintext (6379)
+SmokeTest.exe --tls    # 99 steps, all encrypted (6380) + the TLS section
 ```
 
-Exits with code 0 if every step passes.
+Exits with code 0 if every step passes, and 2 on an unknown argument — a
+mistyped `--tsl` would run in plaintext looking like a success, which is the
+opposite of what the run was meant to prove.
+
+`--tls` needs the override and the certs (see "TLS"). Worth running on both
+backends: the normal build uses SChannel, and `lazbuild -B
+--build-mode=openssl SmokeTest.lpi` switches to OpenSSL.
 
 ## License
 

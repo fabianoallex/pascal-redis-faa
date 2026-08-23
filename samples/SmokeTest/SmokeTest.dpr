@@ -6,13 +6,22 @@
     FPC:    fpc -Fu..\..\src -Fi..\..\src SmokeTest.dpr
     Delphi: dcc32 -NSSystem;Winapi -U..\..\src -I..\..\src SmokeTest.dpr
 
-  ESTADO (M4): alem da conexao, do pool e dos timeouts, a lib ja tem o
-  TRedisClient e as fachadas tipadas por familia. Este programa exercita tudo
-  de ponta a ponta — handshake, Execute generico, pipeline, erro de servidor,
-  binario, RESP2 x RESP3, read timeout, pool, invalidacao de conexao e os
-  comandos de chaves, strings, hashes, listas, conjuntos e sorted sets,
-  inclusive um bloqueante. O que ainda nao existe: TLS e o argumento --tls
-  (M5), MULTI/EXEC e EVAL (M6), pub/sub (M7), streams (M8).
+  ESTADO (M5): conexao, pool, timeouts, fachadas por familia e TLS. Este
+  programa exercita tudo de ponta a ponta — handshake, Execute generico,
+  pipeline, erro de servidor, binario, RESP2 x RESP3, read timeout, pool,
+  invalidacao de conexao e os comandos de chaves, strings, hashes, listas,
+  conjuntos e sorted sets, inclusive um bloqueante. O que ainda nao existe:
+  MULTI/EXEC e EVAL (M6), pub/sub (M7), streams (M8).
+
+  COM --tls, o programa INTEIRO roda contra o listener cifrado (6380) em vez do
+  de texto claro, e ganha uma secao dedicada ao TLS. Nao e' um modo separado com
+  meia duzia de passos: e' a mesma bateria por cima da criptografia, que e' onde
+  um envelope TLS mal-feito aparece (bulk grande atravessando varios registros
+  TLS, pipeline numa escrita so', timeout de socket no meio de um registro).
+  Precisa dos certs e do override — ver docker/docker-compose.tls.yml:
+
+    docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+    SmokeTest.exe --tls
 
   As chaves criadas usam o prefixo 'pascal-redis-faa:smoke:' e sao apagadas no
   fim: nada de FLUSHDB, que apagaria dados de quem estiver usando o mesmo
@@ -52,11 +61,38 @@ uses
 const
   HOST = 'localhost';
   PORT = REDIS_DEFAULT_PORT;
+  PORT_TLS = REDIS_DEFAULT_TLS_PORT;
   PREFIXO = 'pascal-redis-faa:smoke:';
 
 var
   GFalhas: Integer = 0;
   GPassos: Integer = 0;
+  /// Ligado por --tls: manda TODAS as secoes pelo listener cifrado.
+  GUsaTls: Boolean = False;
+
+{ --tls manda o programa inteiro pelo listener cifrado. Qualquer outro
+  argumento e recusado alto: um '--tsl' digitado errado rodaria em texto claro
+  com cara de sucesso, e o smoke test perderia justamente o que se queria
+  provar. }
+function LeArgumentoTls: Boolean;
+var
+  I: Integer;
+  LArg: string;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    LArg := ParamStr(I);
+    if LArg = '--tls' then
+      Result := True
+    else
+    begin
+      WriteLn('argumento desconhecido: ', LArg);
+      WriteLn('uso: SmokeTest [--tls]');
+      Halt(2);
+    end;
+  end;
+end;
 
 procedure Secao(const ATitulo: string);
 begin
@@ -105,9 +141,18 @@ end;
 
 function Params: TRedisParams;
 begin
-  Result := RedisDefaultParams;
+  if GUsaTls then
+  begin
+    Result := RedisDefaultTlsParams;   // ja vem com a porta 6380 e UseTls
+    // O cert de docker/certs e self-signed, entao a validacao de cadeia
+    // recusaria. A lib NAO tem atalho para isso de proposito: baixar a
+    // verificacao e uma decisao de seguranca e tem de aparecer numa linha
+    // explicita de quem a toma — esta aqui.
+    Result.TlsVerifyPeer := False;
+  end
+  else
+    Result := RedisDefaultParams;
   Result.Host := HOST;
-  Result.Port := PORT;
   // Aparece no CLIENT LIST do servidor — vale ouro quando varias apps dividem
   // o mesmo Redis e uma delas esta segurando conexao.
   Result.ClientName := 'pascal-redis-faa-smoke';
@@ -707,6 +752,156 @@ begin
   end;
 end;
 
+{ ---------------------------------------------------------------------------
+  TLS (M5): so roda com --tls. As secoes anteriores ja passaram inteiras por
+  cima da criptografia; o que sobra aqui e o que SO da para verificar mexendo
+  nos parametros — cert recusado, porta trocada e carga grande o bastante para
+  atravessar varios registros TLS.
+  --------------------------------------------------------------------------- }
+procedure ExercitaTls;
+var
+  LParams: TRedisParams;
+  LConn: TRedisConnection;
+  LPool: TRedisPool;
+  LPoolParams: TRedisPoolParams;
+  LPrimeira, LSegunda: TRedisConnection;
+  LGrande, LVolta: TBytes;
+  LPegou: Boolean;
+  LMensagem: string;
+  LInicio: UInt64;
+  I: Integer;
+begin
+  Secao('TLS');
+
+  { Qual motor cifrou de fato. O nome sai da compilacao; o DETALHE so existe no
+    OpenSSL, que publica versao e o caminho da biblioteca que carregou de
+    verdade no primeiro handshake — a informacao que resolve o dia em que a
+    maquina tem tres OpenSSL instalados e o errado venceu. O SChannel nao tem
+    equivalente porque nao ha o que escolher: e o proprio Windows. }
+  Passo('o backend TLS que cifrou se identifica',
+    Pos(RedisTlsBackendName, RedisTlsBackendInfo) > 0,
+    ' -> ' + RedisTlsBackendInfo);
+
+  { Certificado self-signed com a verificacao LIGADA tem de ser recusado. Se
+    este passo falhar, TlsVerifyPeer nao esta chegando ao backend — e o modo
+    seguro estaria aceitando qualquer certificado em silencio, que e a pior
+    falha possivel nesta camada. }
+  LParams := Params;
+  LParams.TlsVerifyPeer := True;
+  LConn := TRedisConnection.Create(LParams);
+  try
+    LPegou := False;
+    LMensagem := '';
+    try
+      LConn.Open;
+    except
+      on E: ERedisTls do
+      begin
+        LPegou := True;
+        LMensagem := E.Message;
+      end;
+    end;
+    Passo('cert self-signed com TlsVerifyPeer=True e recusado', LPegou,
+      ' -> ' + LMensagem);
+    Passo('e a conexao nao ficou aberta pela metade', not LConn.IsOpen);
+  finally
+    LConn.Free;
+  end;
+
+  { Handshake TLS contra o listener de TEXTO CLARO. O servidor le o ClientHello
+    como comando inline e nunca responde um ServerHello, entao quem desata o no
+    e o read timeout — sem ele a thread ficaria pendurada para sempre. O prazo
+    vai curto aqui so para o teste nao custar os 5 s do padrao. }
+  LParams := Params;
+  LParams.Port := PORT;
+  LParams.ReceiveTimeoutMs := 700;
+  LConn := TRedisConnection.Create(LParams);
+  try
+    LInicio := RedisTickMs;
+    LPegou := False;
+    LMensagem := '';
+    try
+      LConn.Open;
+    except
+      on E: ERedisTimeout do
+      begin
+        LPegou := True;
+        LMensagem := E.Message;
+      end;
+    end;
+    Passo('TLS contra porta plain desiste por timeout, nao trava', LPegou,
+      ' -> ' + IntToStr(RedisTickMs - LInicio) + ' ms');
+    // A mensagem tem de apontar a porta, senao o usuario vai procurar defeito
+    // no certificado quando o que errou foi o numero da porta.
+    Passo('e a mensagem aponta a porta como causa provavel',
+      Pos('texto claro', LMensagem) > 0);
+  finally
+    LConn.Free;
+  end;
+
+  { O caso simetrico: conexao em texto claro contra o listener TLS. Aqui o Open
+    PASSA — em RESP2 sem senha, sem nome e no banco 0 o handshake nao emite
+    byte nenhum, entao nao ha o que dar errado ainda. A falha aparece no
+    primeiro comando, quando o servidor descarta a conexao por lixo. Nao da
+    para fazer melhor sem gastar um round-trip em TODA conexao do pool, e esse
+    preco nao vale a pena. }
+  LParams := RedisDefaultParams;
+  LParams.Host := HOST;
+  LParams.Port := PORT_TLS;
+  LConn := TRedisConnection.Create(LParams);
+  try
+    LConn.Open;
+    Passo('plain na porta TLS: o Open passa (o handshake RESP2 nao fala)',
+      LConn.IsOpen);
+    LPegou := False;
+    try
+      LConn.Execute('PING');
+    except
+      on E: ERedisConnectionLost do
+        LPegou := True;
+    end;
+    Passo('e o primeiro comando cai com ERedisConnectionLost', LPegou);
+  finally
+    LConn.Free;
+  end;
+
+  { Carga maior que um registro TLS (~16 KB). E o teste que quebra envelope
+    mal-feito: o valor volta truncado ou embaralhado quando a remontagem de
+    registros esta errada, e nao ha erro nenhum pelo caminho. }
+  LConn := TRedisConnection.Create(Params);
+  try
+    LConn.Open;
+    SetLength(LGrande, 512 * 1024);
+    for I := 0 to High(LGrande) do
+      LGrande[I] := Byte(I and $FF);   // padrao que denuncia bloco fora de ordem
+    LConn.Execute('SET', [Chave('tls-grande'), LGrande]);
+    LVolta := LConn.Execute('GET', [Chave('tls-grande')]).AsBytes;
+    Passo('bulk de 512 KB atravessa varios registros TLS intacto',
+      BytesIguais(LGrande, LVolta),
+      ' -> ' + IntToStr(Length(LVolta)) + ' bytes');
+    LConn.Execute('DEL', [Chave('tls-grande')]);
+  finally
+    LConn.Free;
+  end;
+
+  { Duas conexoes cifradas vivas ao mesmo tempo: prova que o handshake nao
+    depende de estado global de processo (credencial do SChannel, contexto do
+    OpenSSL) e que o pool funciona igual por cima do TLS. }
+  LPoolParams := RedisDefaultPoolParams;
+  LPoolParams.MaxSize := 2;
+  LPool := TRedisPool.Create(Params, LPoolParams);
+  try
+    LPrimeira := LPool.Acquire;
+    LSegunda := LPool.Acquire;
+    Passo('duas conexoes TLS simultaneas pelo pool',
+      LPrimeira.Ping and LSegunda.Ping and (LPool.TotalCount = 2));
+    LPool.Release(LPrimeira);
+    LPool.Release(LSegunda);
+  finally
+    LPool.Free;
+  end;
+end;
+
 procedure Limpa(AConn: TRedisConnection);
 var
   LPipe: TRedisPipeline;
@@ -725,11 +920,23 @@ end;
 procedure Executa;
 var
   LConn: TRedisConnection;
+  LTextoModo, LTextoTls: string;
 begin
-  WriteLn('pascal-redis-faa :: smoke test M4');
-  WriteLn('  alvo ......... ', HOST, ':', PORT);
+  if GUsaTls then
+  begin
+    LTextoModo := ' (TLS)';
+    LTextoTls := ' (exercitado: tudo abaixo passa cifrado)';
+  end
+  else
+  begin
+    LTextoModo := ' (texto claro)';
+    LTextoTls := ' (nao exercitado; rode com --tls)';
+  end;
+
+  WriteLn('pascal-redis-faa :: smoke test M5');
+  WriteLn('  alvo ......... ', HOST, ':', Params.Port, LTextoModo);
   WriteLn('  compilador ... ', {$IFDEF FPC} 'FPC ' + {$I %FPCVERSION%} {$ELSE} 'Delphi' {$ENDIF});
-  WriteLn('  backend TLS .. ', RedisTlsBackendName, ' (nao exercitado ate o M5)');
+  WriteLn('  backend TLS .. ', RedisTlsBackendName, LTextoTls);
 
   LConn := TRedisConnection.Create(Params);
   try
@@ -751,6 +958,8 @@ begin
     LConn.Free;
   end;
 
+  if GUsaTls then
+    ExercitaTls;
   ExercitaTimeout;
   ExercitaPool;
   ExercitaFamilias;
@@ -765,6 +974,7 @@ begin
   {$ELSE}
   ReportMemoryLeaksOnShutdown := True;
   {$ENDIF}
+  GUsaTls := LeArgumentoTls;
   try
     Executa;
   except

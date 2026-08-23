@@ -534,6 +534,86 @@ O resultado é `TRedisScoreMemberArray` nos dois protocolos — que é o ponto: 
 disso nas duas suítes, e o de integração roda o mesmo comando por dois clientes, um em RESP2
 e outro em RESP3, contra o servidor de verdade.
 
+## 31. TLS não é upgrade em banda — é outra porta (M5)
+
+O AMQP negocia TLS na mesma porta em alguns cenários, e muitos protocolos têm
+`STARTTLS`. **O Redis não tem nenhum dos dois:** o servidor abre um listener
+separado (`--tls-port`), e a conexão nasce cifrada ou não nasce.
+
+Isso tem duas consequências que a lib assume explicitamente:
+
+- **`UseTls` quase nunca vem sozinho.** Ligar o TLS sem trocar a porta manda um
+  ClientHello para o listener de texto claro, que o lê como comando inline e
+  nunca responde. É por isso que existe `RedisDefaultTlsParams`: ele muda as
+  duas coisas juntas, que é o único jeito de acertar.
+- **O sintoma desse erro é um timeout, não um erro de criptografia.** Quem
+  desata o nó é o `SO_RCVTIMEO` que o M3 instalou — sem ele a thread ficaria
+  pendurada para sempre no handshake. A `Redis.Connection` traduz esse
+  `ERedisTransportTimeout` para `ERedisTimeout` com uma mensagem que **nomeia a
+  troca de porta como causa provável**, porque a pista natural leva ao lugar
+  errado: o usuário vai investigar certificado quando o que errou foi o número
+  da porta.
+
+O caso simétrico — conexão em texto claro contra o listener TLS — **não** é
+detectado no `Open`, e isso é uma escolha. Em RESP2 sem senha, sem `CLIENT
+SETNAME` e no banco 0 o handshake não emite um byte sequer, então não há nada
+que possa dar errado ainda; a falha aparece no primeiro comando, como
+`ERedisConnectionLost`. Detectar antes exigiria um `PING` em **toda** conexão
+aberta pelo pool, e um round-trip por conexão é caro demais para diagnosticar um
+erro de configuração que acontece uma vez.
+
+## 32. A escolha insegura precisa de uma linha explícita (M5)
+
+`TlsVerifyPeer := False` aceita qualquer certificado: mantém a cifragem do canal
+e joga fora a defesa contra man-in-the-middle. É necessário em desenvolvimento
+(o `docker-compose.tls.yml` usa self-signed) e indefensável em produção.
+
+A tentação seria um atalho — `RedisLocalhostTlsParams`, ou um
+`RedisDefaultTlsParams` que já viesse com a validação desligada, "porque é o que
+todo mundo usa para testar". A lib **não** oferece isso. `RedisDefaultTlsParams`
+troca a porta e liga o TLS, e mantém `TlsVerifyPeer := True`; quem precisa
+baixar a validação escreve a linha:
+
+```pascal
+LParams := RedisDefaultTlsParams;
+LParams.TlsVerifyPeer := False;   // só em desenvolvimento
+```
+
+O raciocínio é de revisão de código, não de ergonomia: essa linha aparece no
+diff de quem a escreveu e num `grep` de quem for auditar. Escondida atrás de um
+nome de função amigável, ela atravessaria para produção sem ninguém notar — é
+assim que a maior parte dos clientes acaba em produção sem validar certificado.
+Há um teste unitário dedicado a travar essa decisão (`DefaultTlsParams_
+MantemAVerificacaoLigada`), justamente para que uma "melhoria de conveniência"
+futura esbarre num teste vermelho.
+
+## 33. O backend TLS é escolhido em compilação, e o build diz qual (M5)
+
+`Redis.Connection` referencia **uma** unit de TLS, decidida por diretiva:
+`REDIS_OPENSSL` tem precedência sobre `REDIS_WINDOWS`, e sem nenhum dos dois não
+há unit alguma. Não há seleção em runtime, e é de propósito: um cliente que
+"tenta OpenSSL e cai para SChannel" acaba usando um backend diferente do que foi
+testado, na máquina do cliente, sem avisar.
+
+Duas consequências:
+
+- **Build sem backend** (fora do Windows, sem a diretiva) não cai para texto
+  claro: `UseTls` levanta `ERedisTls` explicando como habilitar. Abrir em texto
+  claro uma conexão que o chamador pediu cifrada seria vazar a senha do `AUTH`
+  no fio.
+- **`RedisTlsBackendName`/`RedisTlsBackendInfo` são parte da API**, não
+  decoração. O `Info` acrescenta o detalhe de runtime que só o OpenSSL tem:
+  versão e o caminho da biblioteca que realmente carregou — a informação que
+  resolve o dia em que a máquina tem três OpenSSL instalados e o errado venceu.
+  O SChannel não tem equivalente porque não há o que escolher: é o próprio
+  Windows.
+
+  Esse cenário deixou de ser hipotético na própria validação do M5: na mesma
+  máquina, o build FPC x64 carregou **OpenSSL 3.2.4** (`libssl-3-x64.dll`, vinda
+  do PATH) e o build Delphi Win32 carregou **OpenSSL 3.5.2** (`libssl-3.dll`, de
+  `SysWOW64`). Os dois passaram — mas se um deles tivesse falhado, sem o `Info`
+  a investigação começaria pelo lugar errado.
+
 ---
 
 ## Compatibilidade e nomenclatura

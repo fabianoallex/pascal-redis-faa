@@ -249,7 +249,25 @@ type
     ClientName: string;
     /// RESP2 (padrao, universal) ou RESP3 (HELLO 3).
     Protocol: TRedisProtocol;
+
+    /// Cifra a conexao com TLS. O Redis NAO faz upgrade em banda (nao existe
+    /// STARTTLS): o servidor escuta TLS numa porta separada, entao ligar isto
+    /// quase sempre anda junto com trocar a Port para REDIS_DEFAULT_TLS_PORT.
+    ///
+    /// O backend e' decidido em compilacao — SChannel no Windows, OpenSSL com
+    /// -dREDIS_OPENSSL em qualquer plataforma; ver RedisTlsBackendName. Num
+    /// build sem backend nenhum, abrir a conexao levanta ERedisTls em vez de
+    /// cair para texto claro.
     UseTls: Boolean;
+
+    /// Valida o certificado do servidor: cadeia de confianca do sistema mais
+    /// conferencia do nome contra Host. **Desligar aceita qualquer
+    /// certificado**, o que anula a defesa contra man-in-the-middle e deixa
+    /// apenas a cifragem do canal.
+    ///
+    /// Existe por um motivo so': certificado self-signed em desenvolvimento (e'
+    /// o caso do docker/docker-compose.tls.yml). Em producao, instale a CA no
+    /// sistema e deixe isto em True.
     TlsVerifyPeer: Boolean;
     ConnectTimeoutMs: Integer;
     /// Teto de espera por uma resposta. Zero desliga o timeout — nunca faca
@@ -293,6 +311,23 @@ function RedisReplyKindName(AKind: TRedisReplyKind): string;
 /// Parametros com os defaults saos: localhost:6379, banco 0, RESP2, sem TLS,
 /// timeouts de 5 s.
 function RedisDefaultParams: TRedisParams;
+
+/// Como RedisDefaultParams, mas cifrado: porta REDIS_DEFAULT_TLS_PORT (6380) e
+/// UseTls ligado. Existe porque a porta muda junto com o TLS — o Redis nao faz
+/// upgrade em banda — e esquecer disso rende um handshake TLS contra o listener
+/// de texto claro, que falha com uma mensagem de criptografia quando o problema
+/// era o numero da porta.
+///
+/// TlsVerifyPeer continua True. Contra o certificado self-signed do
+/// docker-compose.tls.yml e' preciso desliga-lo numa linha explicita:
+///
+///   LParams := RedisDefaultTlsParams;
+///   LParams.TlsVerifyPeer := False;   // so' em desenvolvimento
+///
+/// Essa linha e' deliberadamente sua, e nao um atalho da lib: baixar a
+/// validacao do certificado e' uma decisao de seguranca, e ela tem que aparecer
+/// no diff de quem a tomou.
+function RedisDefaultTlsParams: TRedisParams;
 
 implementation
 
@@ -449,6 +484,13 @@ begin
   Result.ConnectTimeoutMs := DEFAULT_TIMEOUT_MS;
   Result.ReceiveTimeoutMs := DEFAULT_TIMEOUT_MS;
   Result.SendTimeoutMs := DEFAULT_TIMEOUT_MS;
+end;
+
+function RedisDefaultTlsParams: TRedisParams;
+begin
+  Result := RedisDefaultParams;
+  Result.Port := REDIS_DEFAULT_TLS_PORT;
+  Result.UseTls := True;
 end;
 
 { TRedisArg }

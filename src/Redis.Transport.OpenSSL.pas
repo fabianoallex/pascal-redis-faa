@@ -255,7 +255,7 @@ function SslMustGet(AHandle: TSslLibHandle; const AName, ALib: string): Pointer;
 begin
   Result := SslGetProc(AHandle, AName);
   if Result = nil then
-    raise ERedisTls.CreateFmt('símbolo %s não encontrado em %s (OpenSSL incompatível?)',
+    raise ERedisTls.CreateFmt('simbolo %s nao encontrado em %s (OpenSSL incompativel?)',
       [AName, ALib]);
 end;
 
@@ -300,7 +300,7 @@ begin
     end;
     if LSslName = '' then
       raise ERedisTls.CreateFmt(
-        'OpenSSL não encontrado (tentados: %s). Instale libssl/libcrypto ou desabilite UseTls.',
+        'OpenSSL nao encontrado (tentados: %s). Instale libssl/libcrypto ou desabilite UseTls.',
         [LTried]);
 
     try
@@ -586,7 +586,7 @@ begin
     case LErr of
       SSL_ERROR_WANT_READ:
         if not ReadRawIntoBio then
-          raise ERedisTls.Create('conexão fechada durante o handshake TLS');
+          raise ERedisTls.Create('conexao fechada durante o handshake TLS');
       SSL_ERROR_WANT_WRITE:
         ; // já drenado pelo FlushBioOut acima
     else
@@ -595,7 +595,7 @@ begin
         LVerify := p_SSL_get_verify_result(FSsl);
         if FVerifyPeer and (LVerify <> X509_V_OK) then
           raise ERedisTls.CreateFmt(
-            'validação do certificado do servidor falhou (X509 err %d; %s)',
+            'validacao do certificado do servidor falhou (X509 err %d; %s)',
             [Integer(LVerify), SslFailureText(LErr)]);
         raise ERedisTls.CreateFmt('handshake TLS falhou (%s)', [SslFailureText(LErr)]);
       end;
@@ -718,7 +718,7 @@ end;
 
 function TRedisOpenSslStream.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
 begin
-  raise ERedisTls.Create('TRedisOpenSslStream não suporta Seek');
+  raise ERedisTls.Create('TRedisOpenSslStream nao suporta Seek');
 end;
 
 procedure TRedisOpenSslStream.ShutdownTls;
