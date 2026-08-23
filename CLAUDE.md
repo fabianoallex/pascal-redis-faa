@@ -629,13 +629,27 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    **Ordem: o `CacheAsideVcl` primeiro**, porque é ele que estabelece o esqueleto dual
    (form, marshal, worker, par `.dfm`/`.lfm`) que os outros quatro copiam.
 
-   **Estado (2026-08-23):** o `CacheAsideVcl` está escrito e **validado no FPC/LCL** —
-   `lazbuild` limpo e a bateria inteira dirigida por UI Automation contra o container,
-   conferindo no servidor (não só no log da app) que o `SET` simples zera o TTL (`-1`),
-   que o `KEEPTTL` preserva, que o `DEL` some com a chave (`-2`), e que o lote com TTL
-   fixo fica com **um** valor de TTL para as 20 chaves enquanto o lote com jitter espalha
-   por sete valores. **Falta a validação no Delphi 12** (IDE, pelo `Redis.groupproj`) —
-   é o passo que derrubou um bug no M7 e o que ainda não foi feito aqui.
+   **Sample 1 concluído em 2026-08-23** — `samples/CacheAsideVcl`, validado nos **dois
+   compiladores** contra o container. No FPC/LCL: `lazbuild` limpo e a bateria inteira
+   dirigida por UI Automation, em texto claro e sobre TLS, conferindo **no servidor** (não
+   só no log da app) que o `SET` simples zera o TTL (`-1`), que o `KEEPTTL` preserva, que
+   o `DEL` some com a chave (`-2`), e que o lote com TTL fixo fica com **um** valor de TTL
+   para as 20 chaves enquanto o lote com jitter espalha por sete. No Delphi 12, pela IDE,
+   nas **duas** configurações — `Debug` (SChannel) em texto claro e sobre TLS, e `OpenSSL`
+   sobre TLS —, incluindo as cinco consultas concorrentes e os dois lotes. Nenhum ajuste
+   foi preciso depois da rodada Delphi (ao contrário do M7).
+
+   **Caixa de vazamento é o `Tests Leaked: 0` dos samples.** O `.dpr` liga
+   `ReportMemoryLeaksOnShutdown` só no Delphi, então fechar a janela em silêncio é a prova
+   de que cliente, marshals e work items foram todos liberados — inclusive no caminho de
+   desconexão, que espera as operações em voo. Não apareceu caixa em nenhuma das duas
+   configurações. Manter essa condicional em todos os samples do M9.
+
+   O `--tls` do sample precisa do listener de pé, e o override **não sobe sozinho**
+   (não define imagem): `docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`.
+   Sem ele, marcar TLS falha com `ERedisConnectionLost` e `10061 (recusou ativamente)` —
+   que é diferente do sintoma de apontar TLS para porta plain (`ERedisTimeout` nomeando a
+   troca de porta).
 
    Dois achados do esqueleto que valem para os próximos quatro samples: (a) o `.lpi`
    precisa de `GraphicApplication` em `Linking/Options/Win32`, senão o FPC linka o app
