@@ -128,6 +128,14 @@
         <DCCReference Include="..\..\src\Redis.Transport.pas"/>
         <DCCReference Include="..\..\src\Redis.Connection.pas"/>
         <DCCReference Include="..\..\src\Redis.Pool.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.Keys.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.Strings.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.Hashes.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.Lists.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.Sets.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.ZSets.pas"/>
+        <DCCReference Include="..\..\src\Redis.Client.pas"/>
         <DCCReference Include="..\Unit\Redis.DUnitXCompat.pas"/>
         <DCCReference Include="Redis.IntegrationTests.pas"/>
         <BuildConfiguration Include="Base">

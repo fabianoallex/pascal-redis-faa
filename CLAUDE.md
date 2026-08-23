@@ -150,31 +150,32 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
 
 ## Estrutura de units
 
-Existentes (M0 + M1 + M2 + M3):
+Existentes (M0 + M1 + M2 + M3 + M4):
 
 ```
 src/redis.inc
 src/Redis.Threading.pas          (cópia renomeada)
-src/Redis.Transport.pas          (cópia renomeada; timeouts pendentes — M3)
+src/Redis.Transport.pas          (cópia renomeada; timeouts de socket no M3)
 src/Redis.Transport.Tls.pas      (cópia renomeada)
 src/Redis.Transport.OpenSSL.pas  (cópia renomeada)
 src/Redis.Types.pas              TRedisReplyKind, IRedisReply, TRedisArg, excecoes, params, Utf8Encode/Decode
 src/Redis.Resp.pas               codec RESP2/RESP3: RedisEncodeCommand, TRedisReader, IRedisByteSource
 src/Redis.Connection.pas         TRedisConnection (1 socket, handshake, Execute/ExecuteRaw), TRedisPipeline, TRedisSocketStream
 src/Redis.Pool.pas               TRedisPool (Acquire/Release, descarte, health check, poda), TRedisPoolParams
+src/Redis.Commands.pas           TRedisCommandExecutor (abstrato), TRedisCommandFamily, RedisArgs, conversores
+src/Redis.Commands.Keys.pas      DEL UNLINK EXISTS EXPIRE TTL TYPE RENAME COPY SCAN
+src/Redis.Commands.Strings.pas   GET SET (NX/XX/EX/KEEPTTL/GET) INCR MSET MGET GETRANGE
+src/Redis.Commands.Hashes.pas    HSET HGET HGETALL HMGET HDEL HINCRBY HSCAN
+src/Redis.Commands.Lists.pas     LPUSH RPOP LRANGE LMOVE + BLPOP/BRPOP/BLMOVE
+src/Redis.Commands.Sets.pas      SADD SMEMBERS SMISMEMBER SINTER/SUNION/SDIFF SSCAN
+src/Redis.Commands.ZSets.pas     ZADD ZRANGE ZRANGEBYSCORE ZINCRBY ZPOPMIN ZSCAN
+src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao
 `packages/pascal_redis_faa.pas`):
 
 ```
-src/Redis.Client.pas              fachada + Execute generico
-src/Redis.Commands.Keys.pas       DEL EXPIRE TTL SCAN TYPE RENAME
-src/Redis.Commands.Strings.pas    GET SET INCR SETEX GETSET MSET
-src/Redis.Commands.Hashes.pas     HSET HGET HGETALL HDEL HSCAN
-src/Redis.Commands.Lists.pas      LPUSH RPOP LRANGE + BLPOP/BRPOP
-src/Redis.Commands.Sets.pas       SADD SMEMBERS SINTER
-src/Redis.Commands.ZSets.pas      ZADD ZRANGE ZRANGEBYSCORE ZINCRBY
 src/Redis.Commands.Scripting.pas  EVAL/EVALSHA + cache de SHA
 src/Redis.Commands.Streams.pas    XADD XREADGROUP XACK XAUTOCLAIM
 src/Redis.Commands.Server.pas     PING INFO CONFIG DBSIZE FLUSHDB
@@ -202,9 +203,11 @@ nunca bloqueia o usuário da lib.
 - **Servidor de teste:** `docker/docker-compose.yml` (redis:7.2-alpine, porta 6379) e o
   override `docker-compose.tls.yml` (6380, precisa dos certs de `docker/certs`).
   **Rode o SmokeTest após qualquer mudança na lib.**
-- **Suítes unitárias (M1 + M2, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
+- **Suítes unitárias (M1–M4, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
   (FPCUnit). Não precisam de servidor — a `Redis.ConnectionTests` sobe a conexão inteira
-  sobre um servidor falso em memória (`TRedisConnection.CreateOnStream`). Rodar as do FPC com
+  sobre um servidor falso em memória (`TRedisConnection.CreateOnStream`), e a
+  `Redis.CommandsTests` amarra um `TRedisClient` a esse mesmo servidor falso para conferir
+  **os bytes que foram para o fio** e a conversão da resposta. Rodar as do FPC com
   `lazbuild -B tests\Unit\fpc\RedisUnitTestsFpc.lpi` e depois
   `tests\Unit\fpc\RedisUnitTestsFpc.exe --all --format=plain` (sem parâmetros abre a GUI).
   As do Delphi só pelo IDE, via `Redis.groupproj`.
@@ -215,9 +218,10 @@ nunca bloqueia o usuário da lib.
   `Assert.AreEqual(string, string)` do DUnitX ignora caixa por padrão, o que enfraqueceria
   os testes em silêncio e só do lado Delphi). Ao mexer numa suíte, portar para a outra na
   mesma sessão; conferir com um `diff` das seções de implementation.
-- **Suíte de integração (M3, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
+- **Suíte de integração (M3 + M4, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
   `Redis.IntegrationSuite.dproj`) + `tests/Integration/fpc` (FPCUnit). **Precisa do
-  container de pé.** Mesma regra de paridade das unitárias — corpo idêntico, só as
+  container de pé.** O M4 acrescentou uma fixture por família, mais a do
+  `TRedisClient`. Mesma regra de paridade das unitárias — corpo idêntico, só as
   fixtures mudam. Rodar as do FPC com
   `lazbuild -B tests\Integration\fpc\RedisIntegrationTestsFpc.lpi` e depois
   `tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain`.
@@ -328,7 +332,38 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
      senão N threads veriam o mesmo "cabe mais uma" e estourariam o `MaxSize`.
    - **`CreateConnection` é `virtual`**: é o que torna a lógica do pool testável sem rede
      (as suítes sobrescrevem para devolver conexões sobre o servidor falso).
-4. **M4 — Famílias Strings/Keys/Hashes/Lists/Sets/ZSets.** Integração por família.
+4. ~~**M4 — Famílias Strings/Keys/Hashes/Lists/Sets/ZSets.**~~ **Concluído em
+   2026-08-22.** `Redis.Commands` (executor abstrato + base das famílias), as seis units de
+   família e o `Redis.Client` com `TRedisClient`. **Validado nos DOIS compiladores** contra
+   o container (2026-08-22): SmokeTest **PASS nos 90 passos** no FPC (fpc direto e lazbuild
+   nos dois build modes) **e no Delphi 12** (pelo `Redis.groupproj`), unitárias
+   **301/301** (196 + 105 do M4) e integração **34/34** (11 + 23 do M4), com
+   `Tests Leaked: 0` nas duas suítes DUnitX. A contagem idêntica dos dois lados é o que
+   confirma a paridade; o zero de leaks na de integração confirma que as famílias não
+   deixam conexão nem árvore de resposta para trás — inclusive o pool separado dos
+   bloqueantes, que nasce sob demanda e é destruído com o cliente. Nada no kernel foi
+   alterado no M4: `Redis.Connection` e `Redis.Pool` saíram sem uma linha mudada.
+
+   Decisões tomadas aqui (racional nas seções 26–30 de `docs/DECISOES.md`):
+   - **A família pendura num `TRedisCommandExecutor` abstrato**, não na conexão. É o que
+     quebra o ciclo `família → quem executa → quem reúne as famílias`, e o que deixou a
+     conexão intocada. Class helper por família foi descartado: só um helper por classe
+     fica visível num escopo, e seis units escolheriam um em silêncio.
+   - **Nulo não vira `''` nem `0` na fachada.** Escalar vira tipo nativo; resposta que pode
+     ser nula devolve `IRedisReply` ou tem par `TryXxx`; lista vira `TRedisStringArray`
+     apenas onde o servidor não produz nulo no meio (`MGET` e `HMGET` devolvem
+     `IRedisReply` de propósito).
+   - **Um argumento é `TRedisArg`, não duas sobrecargas.** Os operadores `Implicit` fazem a
+     mesma assinatura aceitar `string` e `TBytes`, o que mantém o contrato binário sem
+     dobrar ~150 métodos. A conversão implícita vale para **parâmetro**, não só para
+     elemento de array constructor — conferido no FPC 3.2.2 com um programa-sonda antes
+     de escrever as units, porque é a premissa em que a API inteira se apoia.
+   - **Bloqueante sai por um pool SEPARADO**, criado sob demanda, com o read timeout
+     esticado por chamada (timeout do comando + `REDIS_BLOCKING_MARGIN_MS`) e **restaurado
+     antes da devolução** — senão o health check do pool esperaria o prazo esticado.
+   - **`WITHSCORES` muda de forma entre RESP2 (lista achatada) e RESP3 (lista de pares)**,
+     e quem absorve é `RedisReplyToScoreMembers`, decidindo pela forma do primeiro item.
+     Achatar isso no leitor estragaria os outros arrays de arrays.
 5. **M5 — TLS.** `UseTls`/`TlsVerifyPeer` nos params, SmokeTest `--tls` PASS nos dois
    backends (SChannel e OpenSSL).
 6. **M6 — `MULTI`/`EXEC`/`WATCH` + `EVAL` com cache de SHA** (o pipeline já saiu no M2).

@@ -6,11 +6,13 @@
     FPC:    fpc -Fu..\..\src -Fi..\..\src SmokeTest.dpr
     Delphi: dcc32 -NSSystem;Winapi -U..\..\src -I..\..\src SmokeTest.dpr
 
-  ESTADO (M2): a lib ja tem conexao de verdade. Este programa exercita a
-  TRedisConnection de ponta a ponta — handshake, Execute generico, pipeline,
-  erro de servidor, binario, RESP2 x RESP3 e invalidacao de conexao. O que
-  ainda nao existe: pool e timeouts (M3), familias tipadas (M4), TLS e o
-  argumento --tls (M5), MULTI/EXEC (M6), pub/sub (M7), streams (M8).
+  ESTADO (M4): alem da conexao, do pool e dos timeouts, a lib ja tem o
+  TRedisClient e as fachadas tipadas por familia. Este programa exercita tudo
+  de ponta a ponta — handshake, Execute generico, pipeline, erro de servidor,
+  binario, RESP2 x RESP3, read timeout, pool, invalidacao de conexao e os
+  comandos de chaves, strings, hashes, listas, conjuntos e sorted sets,
+  inclusive um bloqueante. O que ainda nao existe: TLS e o argumento --tls
+  (M5), MULTI/EXEC e EVAL (M6), pub/sub (M7), streams (M8).
 
   As chaves criadas usam o prefixo 'pascal-redis-faa:smoke:' e sao apagadas no
   fim: nada de FLUSHDB, que apagaria dados de quem estiver usando o mesmo
@@ -37,7 +39,15 @@ uses
   Redis.Types,
   Redis.Resp,
   Redis.Connection,
-  Redis.Pool;
+  Redis.Pool,
+  Redis.Commands,
+  Redis.Commands.Keys,
+  Redis.Commands.Strings,
+  Redis.Commands.Hashes,
+  Redis.Commands.Lists,
+  Redis.Commands.Sets,
+  Redis.Commands.ZSets,
+  Redis.Client;
 
 const
   HOST = 'localhost';
@@ -553,6 +563,150 @@ begin
   end;
 end;
 
+{ ---------------------------------------------------------------------------
+  Familias tipadas (M4): o mesmo kernel, agora com nome de comando, conversao
+  de retorno e a ordem dos modificadores conferida pela lib em vez de pelo
+  chamador.
+  --------------------------------------------------------------------------- }
+procedure ExercitaFamilias;
+var
+  LClient: TRedisClient;
+  LOpc: TRedisSetOptions;
+  LReply: IRedisReply;
+  LMapa: IRedisReply;
+  LItens: TRedisStringArray;
+  LPares: TRedisScoreMemberArray;
+  LPertence: TRedisBooleanArray;
+  LChaveBloq, LValorBloq, LValor: string;
+  LTtl, LRank: Int64;
+  LScore: Double;
+  LInicio: UInt64;
+  LCursor: Int64;
+  LVistas, I: Integer;
+begin
+  Secao('familias tipadas e TRedisClient');
+  LClient := TRedisClient.Create(Params);
+  try
+    { strings }
+    LClient.Strings.SetValue(Chave('f:str'), 'valor');
+    Passo('Strings.SetValue/GetString',
+      LClient.Strings.GetString(Chave('f:str')) = 'valor');
+    Passo('chave ausente e nula, nao vazia',
+      LClient.Strings.Get(Chave('f:naoexiste')).IsNull);
+    Passo('TryGet separa ausente de vazio',
+      not LClient.Strings.TryGet(Chave('f:naoexiste'), LValor));
+
+    LOpc := RedisDefaultSetOptions;
+    LOpc.Condition := scNotExists;
+    LOpc.Expiry := seSeconds;
+    LOpc.ExpiryValue := 60;
+    LReply := LClient.Strings.SetWithOptions(Chave('f:lock'), 'token', LOpc);
+    Passo('SET NX EX grava na primeira vez', not LReply.IsNull);
+    LReply := LClient.Strings.SetWithOptions(Chave('f:lock'), 'outro', LOpc);
+    Passo('e o NX barra a segunda (nulo, nao erro)', LReply.IsNull);
+
+    Passo('Strings.Incr conta a partir do zero',
+      LClient.Strings.Incr(Chave('f:cont')) = 1);
+    Passo('IncrByFloat manda ponto decimal',
+      Abs(LClient.Strings.IncrByFloat(Chave('f:saldo'), 1.5) - 1.5) < 0.0001);
+
+    { keys }
+    LTtl := LClient.Keys.Ttl(Chave('f:lock'));
+    Passo('Keys.Ttl devolve o prazo do SET NX EX', (LTtl > 0) and (LTtl <= 60),
+      ' -> ' + IntToStr(LTtl) + ' s');
+    Passo('Keys.Ttl de chave ausente e -2',
+      LClient.Keys.Ttl(Chave('f:naoexiste')) = REDIS_TTL_NO_KEY);
+    Passo('Keys.KeyType', LClient.Keys.KeyType(Chave('f:str')) = 'string');
+    Passo('Keys.Exists', LClient.Keys.Exists(Chave('f:str')));
+
+    { hashes }
+    LClient.Hashes.HSetMany(Chave('f:hash'), ['ip', '10.0.0.1', 'user', 'ana']);
+    LMapa := LClient.Hashes.HGetAll(Chave('f:hash'));
+    Passo('Hashes.HGetAll achatado, com acesso por campo',
+      (LMapa.Count = 4) and (LMapa.ValueByKey('user').AsString = 'ana'));
+    Passo('Hashes.HIncrBy',
+      LClient.Hashes.HIncrBy(Chave('f:hash'), 'hits', 2) = 2);
+    Passo('Hashes.HDel de campo ausente devolve False',
+      not LClient.Hashes.HDel(Chave('f:hash'), 'nada'));
+
+    { listas }
+    LClient.Lists.RPushMany(Chave('f:lista'), ['a', 'b', 'c']);
+    LItens := LClient.Lists.LRange(Chave('f:lista'), 0, -1);
+    Passo('Lists.RPushMany mantem a ordem do array',
+      (Length(LItens) = 3) and (LItens[0] = 'a') and (LItens[2] = 'c'));
+    Passo('Lists.LMove move entre listas, atomico',
+      LClient.Lists.LMove(Chave('f:lista'), Chave('f:proc'),
+        leRight, leLeft).AsString = 'c');
+
+    { bloqueante: sai por conexao FORA do pool comum, com o prazo do socket
+      esticado para alem do prazo do comando }
+    LInicio := RedisTickMs;
+    Passo('Lists.BLPop acha o que ja esta na fila',
+      LClient.Lists.BLPop([Chave('f:proc')], 5, LChaveBloq, LValorBloq) and
+      (LValorBloq = 'c'));
+    Passo('BLPop com fila vazia devolve False no prazo, sem erro',
+      not LClient.Lists.BLPop([Chave('f:vazia')], 1, LChaveBloq, LValorBloq));
+    Passo('e o bloqueante nao segurou o pool comum',
+      (LClient.Pool.InUseCount = 0) and (RedisTickMs - LInicio < 5000));
+
+    { conjuntos }
+    LClient.Sets.SAddMany(Chave('f:set:a'), ['redis', 'pascal']);
+    LClient.Sets.SAddMany(Chave('f:set:b'), ['redis', 'lazarus']);
+    Passo('Sets.SAdd de membro repetido devolve False',
+      not LClient.Sets.SAdd(Chave('f:set:a'), 'redis'));
+    LPertence := LClient.Sets.SMIsMember(Chave('f:set:a'), ['redis', 'lazarus']);
+    Passo('Sets.SMIsMember mapeia 0/1 na ordem pedida',
+      (Length(LPertence) = 2) and LPertence[0] and (not LPertence[1]));
+    LItens := LClient.Sets.SInter([Chave('f:set:a'), Chave('f:set:b')]);
+    Passo('Sets.SInter resolve no servidor',
+      (Length(LItens) = 1) and (LItens[0] = 'redis'));
+
+    { sorted sets }
+    LClient.ZSets.ZAddMany(Chave('f:zset'), [100, 'ana', 300, 'bob', 200, 'cida']);
+    LItens := LClient.ZSets.ZRevRange(Chave('f:zset'), 0, 1);
+    Passo('ZSets.ZRevRange devolve o topo do ranking',
+      (Length(LItens) = 2) and (LItens[0] = 'bob') and (LItens[1] = 'cida'));
+    LPares := LClient.ZSets.ZRangeWithScores(Chave('f:zset'), 0, -1);
+    Passo('ZSets.ZRangeWithScores devolve membro e score',
+      (Length(LPares) = 3) and (LPares[0].Member = 'ana') and
+      (Abs(LPares[0].Score - 100) < 0.0001));
+    LItens := LClient.ZSets.ZRangeByScore(Chave('f:zset'),
+      RedisScoreBound(100, True), REDIS_SCORE_MAX);
+    Passo('ZRangeByScore com extremo aberto exclui o limite',
+      Length(LItens) = 2);
+    Passo('ZSets.ZTryScore acha o membro',
+      LClient.ZSets.ZTryScore(Chave('f:zset'), 'ana', LScore) and
+      (Abs(LScore - 100) < 0.0001));
+    Passo('e devolve False para quem nao esta no conjunto',
+      not LClient.ZSets.ZTryScore(Chave('f:zset'), 'ninguem', LScore));
+    Passo('ZSets.ZTryRank da a posicao 0-based crescente',
+      LClient.ZSets.ZTryRank(Chave('f:zset'), 'ana', LRank) and (LRank = 0));
+
+    { SCAN: cursor opaco, laco ate' voltar a zero }
+    for I := 1 to 20 do
+      LClient.Strings.SetValue(Chave('f:scan:' + IntToStr(I)), 'v');
+    LVistas := 0;
+    LCursor := 0;
+    repeat
+      LItens := LClient.Keys.Scan(LCursor, PREFIXO + 'f:scan:*', 5);
+      Inc(LVistas, Length(LItens));
+    until LCursor = 0;
+    Passo('Keys.Scan varre o prefixo inteiro em varios passos',
+      LVistas >= 20, ' -> ' + IntToStr(LVistas) + ' chaves');
+
+    { faxina pela propria fachada }
+    for I := 1 to 20 do
+      LClient.Keys.Del(Chave('f:scan:' + IntToStr(I)));
+    LClient.Keys.DelMany([Chave('f:str'), Chave('f:lock'), Chave('f:cont'),
+      Chave('f:saldo'), Chave('f:hash'), Chave('f:lista'), Chave('f:proc'),
+      Chave('f:set:a'), Chave('f:set:b'), Chave('f:zset')]);
+    Passo('e a faxina pela fachada nao deixa chave para tras',
+      not LClient.Keys.Exists(Chave('f:zset')));
+  finally
+    LClient.Free;
+  end;
+end;
+
 procedure Limpa(AConn: TRedisConnection);
 var
   LPipe: TRedisPipeline;
@@ -572,7 +726,7 @@ procedure Executa;
 var
   LConn: TRedisConnection;
 begin
-  WriteLn('pascal-redis-faa :: smoke test M3');
+  WriteLn('pascal-redis-faa :: smoke test M4');
   WriteLn('  alvo ......... ', HOST, ':', PORT);
   WriteLn('  compilador ... ', {$IFDEF FPC} 'FPC ' + {$I %FPCVERSION%} {$ELSE} 'Delphi' {$ENDIF});
   WriteLn('  backend TLS .. ', RedisTlsBackendName, ' (nao exercitado ate o M5)');
@@ -599,6 +753,7 @@ begin
 
   ExercitaTimeout;
   ExercitaPool;
+  ExercitaFamilias;
   ExercitaInvalidacao;
 end;
 

@@ -42,6 +42,38 @@
         <UnitName Value="Redis.Pool"/>
       </Item>
       <Item>
+        <Filename Value="..\src\Redis.Commands.pas"/>
+        <UnitName Value="Redis.Commands"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Commands.Keys.pas"/>
+        <UnitName Value="Redis.Commands.Keys"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Commands.Strings.pas"/>
+        <UnitName Value="Redis.Commands.Strings"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Commands.Hashes.pas"/>
+        <UnitName Value="Redis.Commands.Hashes"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Commands.Lists.pas"/>
+        <UnitName Value="Redis.Commands.Lists"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Commands.Sets.pas"/>
+        <UnitName Value="Redis.Commands.Sets"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Commands.ZSets.pas"/>
+        <UnitName Value="Redis.Commands.ZSets"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.Client.pas"/>
+        <UnitName Value="Redis.Client"/>
+      </Item>
+      <Item>
         <Filename Value="..\src\Redis.Transport.pas"/>
         <UnitName Value="Redis.Transport"/>
       </Item>

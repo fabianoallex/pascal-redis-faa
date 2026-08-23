@@ -3,11 +3,12 @@
 Cliente **Redis** (protocolo RESP2/RESP3) para **Free Pascal/Lazarus e Delphi**, numa
 única codebase, escrito do zero. Licença MIT.
 
-> **Status: em construção (M3 — pool, timeouts e reconexão).** Já dá para conectar,
-> autenticar, executar **qualquer** comando do Redis, usar pipeline e trabalhar com um
-> pool de conexões com timeout de verdade, em RESP2 ou RESP3. Ainda faltam as fachadas
-> tipadas por família (M4), TLS (M5), transações (M6), pub/sub (M7) e streams (M8). O
-> roadmap completo está em `CLAUDE.md`.
+> **Status: em construção (M4 — famílias de comandos).** Já dá para conectar,
+> autenticar, executar **qualquer** comando do Redis, usar pipeline, trabalhar com um
+> pool de conexões com timeout de verdade e chamar os comandos de Keys, Strings, Hashes,
+> Lists, Sets e ZSets pela fachada tipada — inclusive os bloqueantes — em RESP2 ou
+> RESP3. Ainda faltam TLS (M5), transações e scripting (M6), pub/sub (M7) e streams
+> (M8). O roadmap completo está em `CLAUDE.md`.
 
 Projeto irmão da [`pascal-amqp-faa`](../pascal-amqp-faa) (cliente AMQP 0-9-1) e da
 `pascal-pipes-faa` (IPC), com as mesmas regras: codebase dual FPC 3.2.2 + Delphi 12,
@@ -94,6 +95,95 @@ begin
 end.
 ```
 
+### Fachadas tipadas por família
+
+`TRedisClient` é o objeto que a aplicação segura: pool por dentro, comandos tipados por
+fora. Não há `Connect` — a conexão abre no primeiro comando.
+
+```pascal
+uses
+  SysUtils, Redis.Types, Redis.Client, Redis.Commands, Redis.Commands.Strings;
+
+var
+  LClient: TRedisClient;
+  LOpcoes: TRedisSetOptions;
+  LSessao: IRedisReply;
+  LTopo: TRedisStringArray;
+  LJson, LToken, LValor: string;
+begin
+  LClient := TRedisClient.Create(RedisDefaultParams);
+  try
+    LClient.Strings.SetEx('cache:usuario:1', 3600, LJson);
+
+    // Ausente e vazio são coisas diferentes: TryGet devolve a presença.
+    if LClient.Strings.TryGet('cache:usuario:1', LValor) then
+      WriteLn(LValor);
+
+    // Lock distribuído: SET NX PX devolve nulo quando outro já tem a posse.
+    LOpcoes := RedisDefaultSetOptions;
+    LOpcoes.Condition := scNotExists;      // NX
+    LOpcoes.Expiry := seMilliseconds;      // PX
+    LOpcoes.ExpiryValue := 30000;
+    if not LClient.Strings.SetWithOptions('lock:pedido:7', LToken, LOpcoes).IsNull then
+      WriteLn('a posse é minha');
+
+    LClient.Hashes.HSetMany('sessao:42', ['ip', '10.0.0.1', 'user', 'ana']);
+    LSessao := LClient.Hashes.HGetAll('sessao:42');
+    WriteLn(LSessao.ValueByKey('user').AsString);
+
+    LClient.ZSets.ZAdd('ranking', 1500, 'fabiano');
+    LTopo := LClient.ZSets.ZRevRange('ranking', 0, 9);   // top 10
+
+    LClient.Keys.Expire('sessao:42', 900);
+  finally
+    LClient.Free;
+  end;
+end.
+```
+
+Cada comando pega uma conexão do pool e a devolve antes de retornar, o que torna o mesmo
+`TRedisClient` seguro para várias threads. Quando a sequência **precisa** da mesma conexão
+(`SELECT`, e mais adiante `MULTI`/`WATCH`), amarre um cliente a uma conexão emprestada:
+
+```pascal
+LConn := LClient.Acquire;
+try
+  LDedicado := TRedisClient.CreateOnConnection(LConn);
+  try
+    ...            // tudo pela MESMA conexão
+  finally
+    LDedicado.Free;
+  end;
+finally
+  LClient.Release(LConn);
+end;
+```
+
+Convenção de retorno, válida em todas as famílias: escalar vira tipo nativo (`Boolean`,
+`Int64`, `Double`, `string`); resposta que **pode ser nula** vira `IRedisReply` ou tem um
+par `TryXxx` com `out`, porque "chave ausente" e "chave que vale zero" não podem virar o
+mesmo valor; lista vira `TRedisStringArray`. Chaves, campos e valores entram como
+`TRedisArg`, que aceita `string` e `TBytes` na **mesma** assinatura — a API é
+binário-segura sem sobrecarga duplicada.
+
+### Comandos bloqueantes
+
+`BLPOP`, `BRPOP` e `BLMOVE` não saem do pool comum: um worker esperando 30 s por uma
+tarefa seguraria uma conexão de que as outras threads precisam e, pior, morreria de
+timeout de socket antes de o comando terminar — deixando a resposta a caminho para
+contaminar a próxima conexão. A fachada os manda por um pool separado, com o read timeout
+esticado para além do prazo do comando.
+
+```pascal
+// False não é erro: é o worker ocioso. Com várias chaves, LChave diz de qual veio.
+while not GParar do
+  if LClient.Lists.BLPop(['fila:alta', 'fila:baixa'], 5, LChave, LTarefa) then
+    Processa(LChave, LTarefa);
+```
+
+Prazo zero significa esperar para sempre — só faz sentido em thread dedicada, porque a
+única forma de cancelar é derrubar a conexão.
+
 ### Pool de conexões
 
 O Redis não tem canal: uma conexão processa um comando por vez. A unidade de concorrência é
@@ -140,11 +230,13 @@ a resposta atrasada ainda pode chegar, e reciclar essa conexão entregaria essa 
 comando seguinte. Sem esse timeout, um servidor que emudece prende a conexão e a thread que
 chamou para sempre: o Redis não tem heartbeat.
 
-Comandos bloqueantes (`BLPOP`, `BRPOP`, `XREAD BLOCK`) precisam de um timeout maior que o do
-próprio comando — use `TRedisConnection.SetReceiveTimeout` numa conexão fora do pool.
+Comandos bloqueantes precisam de um timeout maior que o do próprio comando. A fachada já
+cuida disso (seção "Comandos bloqueantes"); quem for direto na conexão usa
+`TRedisConnection.SetReceiveTimeout` numa conexão fora do pool.
 
-`Execute` alcança qualquer comando desde já — as fachadas tipadas por família (M4) serão
-uma camada por cima, nunca um pré-requisito.
+`Execute` alcança qualquer comando, presente ou futuro. As fachadas tipadas por família são
+uma camada de conveniência por cima — nunca um pré-requisito, e nunca um limite: um comando
+que a lib ainda não modelou continua a uma linha de distância.
 
 **Binário por contrato.** Argumento `TBytes` vai byte a byte para o fio e `AsBytes`
 devolve o valor cru; as sobrecargas `string` passam por UTF-8. Um valor com CRLF, zero ou
@@ -183,7 +275,10 @@ memória, que entrega a resposta em pedaços de tamanho controlado para reproduz
 leituras parciais de rede; a conexão inteira (handshake, `Execute`, pipeline,
 invalidação) sobe sobre um servidor falso, também em memória. A lógica do pool
 (teto, reuso, descarte, poda por ociosidade, health check reprovando) roda sobre
-esse mesmo servidor falso.
+esse mesmo servidor falso. As fachadas por família são verificadas nas duas metades que
+importam: os bytes que foram para o fio (a ordem dos modificadores de `SET`, `ZADD` e
+`ZRANGEBYSCORE` não é livre) e a conversão da resposta (nulo que não pode virar `''`,
+`WITHSCORES` mudando de forma entre RESP2 e RESP3).
 
 **FPC/Lazarus (FPCUnit):**
 
@@ -198,8 +293,10 @@ tests\Unit\fpc\RedisUnitTestsFpc.exe --all --format=plain
 
 Precisam do container de pé (seção "Servidor de desenvolvimento"). Cobrem o que não dá para
 verificar em memória: read timeout de socket de verdade, conexão derrubada pelo servidor
-(`CLIENT KILL`), conexão contaminada por resposta atrasada e várias threads dividindo o
-mesmo pool.
+(`CLIENT KILL`), conexão contaminada por resposta atrasada, várias threads dividindo o
+mesmo pool e uma bateria por família de comandos contra o servidor real — incluindo um
+`BLPOP` com prazo maior que o read timeout e a prova de que `HGETALL` e `ZRANGE
+WITHSCORES` devolvem o mesmo resultado em RESP2 e em RESP3.
 
 ```
 lazbuild -B tests\Integration\fpc\RedisIntegrationTestsFpc.lpi

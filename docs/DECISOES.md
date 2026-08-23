@@ -434,6 +434,106 @@ bloco recém-liberado, então `velha <> nova` falha mesmo quando a troca acontec
 por cima lê um ponteiro morto. Quem atesta a troca são os contadores do pool
 (`CreatedCount`/`DiscardedCount`).
 
+## 26. As famílias penduram num executor abstrato, não na conexão (M4)
+
+As fachadas por família precisam de alguém que execute comandos; quem as reúne
+(`TRedisClient`) precisa das famílias. Ligar as duas pontas direto fecharia um ciclo de
+units, que nem Delphi nem FPC aceitam.
+
+A solução é uma classe abstrata mínima, `TRedisCommandExecutor`, na `Redis.Commands`, com
+três métodos: `Execute`, `ExecuteRaw` e `ExecuteBlocking`. Com ela a seta aponta num sentido
+só — `Redis.Commands` ← `Redis.Commands.Strings` ← `Redis.Client` — e as famílias ficam
+ignorantes de pool, socket e protocolo.
+
+Duas alternativas foram descartadas:
+
+- **Class helper por família.** Só um helper de uma classe fica visível por escopo, e com
+  seis famílias em seis units o compilador escolheria uma em silêncio. Bug de importação,
+  não de código.
+- **`TRedisConnection` implementando o executor.** Obrigaria a conexão a conhecer a camada
+  de comandos e a mudar de ancestral para satisfazer uma camada acima dela. A conexão saiu
+  do M4 sem uma linha alterada, que é como uma peça de kernel deve atravessar um milestone
+  de conveniência.
+
+Quem quer as famílias sobre uma conexão específica usa `TRedisClient.CreateOnConnection`,
+que é o mesmo caminho de quem precisa de afinidade de conexão para `SELECT`, `MULTI` ou
+`WATCH`.
+
+## 27. Na fachada, nulo não vira `''` nem `0` (M4)
+
+A regra do M1 (decisão 14) valia para a árvore de respostas. Na fachada tipada ela volta a
+ser uma escolha, porque a assinatura mais confortável — `function GetString(chave): string`
+— é justamente a que apaga a diferença entre "a chave não existe" e "a chave existe e vale
+`''`". Num cache, essas duas coisas levam a decisões opostas.
+
+A convenção, válida nas seis famílias:
+
+1. Escalar vira tipo nativo: `Boolean`, `Int64`, `Double`, `string`.
+2. Resposta que **pode ser nula** devolve `IRedisReply` **ou** ganha um par `TryXxx` com
+   `out` e retorno `Boolean` — `TryGet`, `HTryGet`, `ZTryScore`, `ZTryRank`.
+3. Lista de valores vira `TRedisStringArray`, com item nulo virando `''`. Vale só onde o
+   servidor **não** produz nulo no meio da lista (`LRANGE`, `SMEMBERS`, `HKEYS`); onde
+   produz — `MGET`, `HMGET` — o retorno é `IRedisReply`, de propósito.
+
+`GetString` continua existindo, porque na maior parte dos casos o `''` serve; o que não
+existe é *só* ele.
+
+## 28. Um argumento é `TRedisArg`, não duas sobrecargas (M4)
+
+Chaves, campos e valores do Redis são binários. A saída óbvia seria duplicar cada método:
+uma sobrecarga `string` e uma `TBytes`. Com ~150 métodos, isso dobraria a superfície da API
+e a chance de as duas versões divergirem.
+
+Como `TRedisArg` já tem `class operator Implicit` de `string` e de `TBytes`, uma assinatura
+única `const AKey: TRedisArg` aceita as duas formas na chamada, sem conversão explícita e
+sem perder o contrato binário. Foi verificado nos dois compiladores antes de o M4 começar:
+a conversão implícita vale para parâmetro, não só para elemento de array constructor.
+
+O retorno é o lado que não dá para unificar — `string` e `TBytes` são tipos distintos — e aí
+existe um par `...Bytes` só onde o valor pode não ser texto (`GetBytes`, `HGetBytes`,
+`BLPopBytes`, `SMembersBytes`).
+
+## 29. Comando bloqueante sai por um pool separado (M4)
+
+A decisão 6 já dizia que `BLPOP` precisa de conexão fora do pool comum. O M4 precisou
+escolher **qual** conexão, e a resposta é um segundo `TRedisPool`, criado sob demanda na
+primeira chamada bloqueante.
+
+As alternativas eram piores:
+
+- **Uma conexão detached por chamada** custa um TCP + handshake a cada `BLPOP`. Num worker
+  em laço, é um handshake por tarefa.
+- **Uma conexão detached em cache** serializaria dois workers do mesmo cliente num socket
+  só — exatamente o que o pool existe para evitar.
+
+O prazo do socket é esticado por chamada (`SetReceiveTimeout`) para o timeout do comando
+mais `REDIS_BLOCKING_MARGIN_MS` (2 s), e **restaurado antes da devolução**: uma conexão
+voltando ao pool com 32 s de read timeout faria o health check de um `PING` esperar 32 s por
+um servidor que já morreu. Timeout zero (esperar para sempre) vira read timeout zero — a
+única situação em que a lib deixa uma conexão sem prazo, e só porque o comando também não
+tem.
+
+No modo conexão única (`CreateOnConnection`) não há pool nenhum: a conexão já é dedicada a
+quem chamou, então o bloqueante estica e restaura o prazo dela mesma.
+
+## 30. `WITHSCORES` muda de forma entre RESP2 e RESP3 — a fachada absorve (M4)
+
+O M1 resolveu o `HGETALL` guardando o mapa do RESP3 achatado (decisão 13), o que fez array
+e mapa terem a mesma forma. O sorted set traz o caso inverso, e mais desagradável: em RESP2
+o `ZRANGE ... WITHSCORES` responde uma lista **achatada** (membro, score, membro, score); em
+RESP3, uma lista de **pares** `[membro, score]`, com o score como double nativo.
+
+Achatar o par no leitor resolveria este comando e estragaria os outros — nem todo array de
+arrays é um par membro/score. Então a conversão fica na família, em
+`RedisReplyToScoreMembers`, que decide pela forma do primeiro item: se ele é agregado,
+chegaram pares; se é escalar, chegou lista achatada. Não há ambiguidade, porque um membro é
+sempre escalar.
+
+O resultado é `TRedisScoreMemberArray` nos dois protocolos — que é o ponto: trocar
+`Protocol` não pode obrigar a aplicação a reescrever o comando mais usado do tipo. Há teste
+disso nas duas suítes, e o de integração roda o mesmo comando por dois clientes, um em RESP2
+e outro em RESP3, contra o servidor de verdade.
+
 ---
 
 ## Compatibilidade e nomenclatura

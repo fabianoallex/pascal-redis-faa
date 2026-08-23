@@ -23,7 +23,8 @@ uses
   Redis.TypesTests,
   Redis.RespTests,
   Redis.ConnectionTests,
-  Redis.PoolTests;
+  Redis.PoolTests,
+  Redis.CommandsTests;
 
 var
   ConsoleApp: TTestRunner;

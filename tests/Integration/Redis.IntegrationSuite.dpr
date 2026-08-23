@@ -27,6 +27,14 @@ uses
   Redis.Transport in '..\..\src\Redis.Transport.pas',
   Redis.Connection in '..\..\src\Redis.Connection.pas',
   Redis.Pool in '..\..\src\Redis.Pool.pas',
+  Redis.Commands in '..\..\src\Redis.Commands.pas',
+  Redis.Commands.Keys in '..\..\src\Redis.Commands.Keys.pas',
+  Redis.Commands.Strings in '..\..\src\Redis.Commands.Strings.pas',
+  Redis.Commands.Hashes in '..\..\src\Redis.Commands.Hashes.pas',
+  Redis.Commands.Lists in '..\..\src\Redis.Commands.Lists.pas',
+  Redis.Commands.Sets in '..\..\src\Redis.Commands.Sets.pas',
+  Redis.Commands.ZSets in '..\..\src\Redis.Commands.ZSets.pas',
+  Redis.Client in '..\..\src\Redis.Client.pas',
   Redis.DUnitXCompat in '..\Unit\Redis.DUnitXCompat.pas',
   Redis.IntegrationTests in 'Redis.IntegrationTests.pas';
 
