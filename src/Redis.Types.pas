@@ -177,6 +177,12 @@ type
     /// rkDouble, o numero formatado; num rkBoolean, 't' ou 'f'; num rkNull,
     /// string vazia — se a diferenca entre nulo e '' importa (e no Redis quase
     /// sempre importa), teste IsNull antes.
+    ///
+    /// Em valor que NAO e' UTF-8 valido (um JPEG, um protobuf) isto NAO
+    /// levanta: os bytes indecifraveis viram caractere de substituicao e a
+    /// vida segue. Levantar ali transformaria um engano brando — chamar
+    /// AsString onde cabia AsBytes — em excecao no meio de um callback de
+    /// pub/sub, por exemplo. Para valor binario o caminho e' AsBytes.
     function AsString: string;
 
     /// Valor inteiro. Aceita rkInteger e, por conveniencia, escalares de texto
@@ -339,6 +345,10 @@ const
 var
   /// FormatSettings invariante (ponto decimal), montado na inicializacao.
   GFloatFormat: TFormatSettings;
+  {$IFNDEF FPC}
+  /// Decodificador UTF-8 TOLERANTE do Delphi. Ver a nota na inicializacao.
+  GUtf8Lenient: TEncoding;
+  {$ENDIF}
 
 { ERedisReplyError }
 
@@ -382,7 +392,11 @@ end;
 
 function RedisUtf8Decode(const ABytes: TBytes): string;
 begin
-  Result := TEncoding.UTF8.GetString(ABytes);
+  if Length(ABytes) = 0 then
+    Exit('');
+  // GUtf8Lenient, e nao TEncoding.UTF8: ver a nota na inicializacao. Bytes que
+  // nao formam UTF-8 valido viram U+FFFD em vez de excecao.
+  Result := GUtf8Lenient.GetString(ABytes);
 end;
 {$ENDIF}
 
@@ -531,6 +545,23 @@ begin
 end;
 
 initialization
+  {$IFNDEF FPC}
+  { Por que NAO usar TEncoding.UTF8 para decodificar.
+
+    O TUTF8Encoding do Delphi nasce com MB_ERR_INVALID_CHARS, e o
+    TEncoding.GetString levanta EEncodingError quando a conversao nao produz
+    caractere nenhum. Resultado: AsString num valor BINARIO — coisa
+    corriqueira no Redis, que guarda bytes — explodia com uma excecao da RTL,
+    e so' no Delphi: no FPC a mesma rotina apenas remarca o codepage e nunca
+    falha. Divergencia dessas e' exatamente o que estas duas funcoes existem
+    para eliminar.
+
+    Com os flags zerados, o MultiByteToWideChar troca o byte invalido por
+    U+FFFD e segue. Continua valendo o contrato: valor que pode nao ser texto
+    se le com AsBytes; AsString e' para quando se sabe que e' texto. }
+  GUtf8Lenient := TMBCSEncoding.Create(CP_UTF8, 0, 0);
+  {$ENDIF}
+
   // FormatSettings dedicado: ponto decimal e sem separador de milhar,
   // independente do locale da maquina.
   {$IFDEF FPC}
@@ -540,5 +571,10 @@ initialization
   {$ENDIF}
   GFloatFormat.DecimalSeparator := '.';
   GFloatFormat.ThousandSeparator := #0;
+
+{$IFNDEF FPC}
+finalization
+  GUtf8Lenient.Free;
+{$ENDIF}
 
 end.

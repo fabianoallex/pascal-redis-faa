@@ -21,6 +21,7 @@ type
     procedure RoundTrip_ComAcentos;
     procedure RoundTrip_TextoLongo;
     procedure Decode_PreservaBytesArbitrarios;
+    procedure Decode_BytesInvalidos_NaoLevanta;
   end;
 
   TRedisNumberTests = class(TTestCase)
@@ -146,6 +147,39 @@ begin
   // decode nao mexe nos bytes alem de marcar o codepage.
   LBytes := MakeBytes([$C3, $A9, $20, $41]);  // 'e' agudo, espaco, 'A'
   TAssert.AssertEquals('C3A92041', Bs(RedisUtf8Encode(RedisUtf8Decode(LBytes))));
+end;
+
+procedure TRedisUtf8Tests.Decode_BytesInvalidos_NaoLevanta;
+var
+  LBytes: TBytes;
+  LTexto: string;
+  LLevantou: Boolean;
+begin
+  // $FF nao aparece em UTF-8 valido em lugar nenhum. Decodificar isso e' o que
+  // acontece quando alguem chama AsString num valor BINARIO — coisa
+  // corriqueira num Redis, que guarda bytes.
+  //
+  // Este teste existe por uma divergencia real entre os compiladores: o
+  // TEncoding.UTF8 do Delphi nasce com MB_ERR_INVALID_CHARS e o GetString
+  // LEVANTA EEncodingError quando a conversao nao produz caractere nenhum,
+  // enquanto no FPC a mesma rotina so' remarca o codepage e nunca falha. Eram
+  // dois comportamentos para a mesma chamada, e o do Delphi ainda vazava
+  // excecao da RTL para fora da lib. Ver a nota na inicializacao de
+  // Redis.Types.
+  LBytes := MakeBytes([0, 13, 10, 255, 1, 65]);
+  LLevantou := False;
+  LTexto := 'sentinela';
+  try
+    LTexto := RedisUtf8Decode(LBytes);
+  except
+    on E: Exception do
+      LLevantou := True;
+  end;
+  TAssert.AssertFalse('decodificar bytes binarios nao pode levantar', LLevantou);
+  // O que sai do decode difere entre os compiladores de proposito (o Delphi
+  // troca o byte invalido por U+FFFD; o FPC carrega os bytes). O contrato e'
+  // so' este: nao levanta, e quem quer os bytes usa AsBytes.
+  TAssert.AssertTrue('e devolve alguma coisa', LTexto <> 'sentinela');
 end;
 
 { TRedisNumberTests }

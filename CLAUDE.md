@@ -139,6 +139,15 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
   `SmokeTest.dpr` do M0; corrigido no M1.)
 - `PWideChar(string)` não existe (string é Ansi) → campos que vão para APIs wide são
   `UnicodeString` (ver `Redis.Transport.Tls.FTargetName`).
+- **`TEncoding.UTF8.GetString` do Delphi LEVANTA em bytes que não são UTF-8 válido**, e o
+  FPC não. O `TUTF8Encoding` nasce com `MB_ERR_INVALID_CHARS`, e o `TEncoding.GetString`
+  tem um `if (ByteCount > 0) and (Len = 0) then raise EEncodingError`. Como o Redis guarda
+  **bytes**, `AsString` num valor binário estourava — só no Delphi, e com exceção da RTL.
+  Por isso o `RedisUtf8Decode` usa um `TMBCSEncoding.Create(CP_UTF8, 0, 0)` próprio
+  (tolerante: byte inválido vira U+FFFD). Achado na validação do M7 no Delphi, onde
+  derrubava calado a mensagem binária de pub/sub — o callback levantava, a lib mandava
+  para o `OnError` e a mensagem sumia. Travado por teste nas duas suítes
+  (`Decode_BytesInvalidos_NaoLevanta`, `AsString_EmBulkBinario_NaoLevanta`).
 - Enum anônimo inline como campo de classe não compila → tipo nomeado.
 - Citar um diretivo de compilação dentro de um comentário de prosa entre chaves quebra a
   compilação: a chave de fechamento do texto citado fecha o comentário mais cedo. Escrever

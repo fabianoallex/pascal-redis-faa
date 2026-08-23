@@ -138,6 +138,7 @@ type
     procedure AsBoolean_InteiroZeroEhFalso;
     procedure AsString_EmArray_Levanta;
     procedure AsBytes_EmNulo_EhVazio;
+    procedure AsString_EmBulkBinario_NaoLevanta;
     procedure Items_EmEscalar_Levanta;
     procedure Items_ForaDosLimites_Levanta;
     procedure ValueByKey_EmEscalar_Levanta;
@@ -1143,6 +1144,31 @@ end;
 procedure TRedisTypeAccessTests.AsBytes_EmNulo_EhVazio;
 begin
   TAssert.AssertEquals(0, Length(Analisa('_'#13#10).AsBytes));
+end;
+
+procedure TRedisTypeAccessTests.AsString_EmBulkBinario_NaoLevanta;
+var
+  LBin: TBytes;
+  LReply: IRedisReply;
+  LLevantou: Boolean;
+begin
+  // Valor binario e' o caso normal no Redis, e AsString nele e' um engano
+  // brando: o certo e' AsBytes. Engano brando nao pode virar excecao da RTL —
+  // e virava, so' no Delphi, porque o TEncoding.UTF8 dele recusa byte
+  // invalido. Ver Redis.TypesTests.Decode_BytesInvalidos_NaoLevanta.
+  LBin := MakeBytes([0, 13, 10, 255, 1, 65]);
+  LReply := RedisBulk(LBin);
+  LLevantou := False;
+  try
+    LReply.AsString;
+  except
+    on E: Exception do
+      LLevantou := True;
+  end;
+  TAssert.AssertFalse('AsString em bulk binario nao pode levantar', LLevantou);
+  // E o caminho binario continua exato, que e' o que de fato importa.
+  TAssert.AssertEquals(6, Length(LReply.AsBytes));
+  TAssert.AssertEquals(255, LReply.AsBytes[3]);
 end;
 
 procedure TRedisTypeAccessTests.Items_EmEscalar_Levanta;
