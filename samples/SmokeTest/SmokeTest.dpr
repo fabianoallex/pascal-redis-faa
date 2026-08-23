@@ -6,13 +6,14 @@
     FPC:    fpc -Fu..\..\src -Fi..\..\src SmokeTest.dpr
     Delphi: dcc32 -NSSystem;Winapi -U..\..\src -I..\..\src SmokeTest.dpr
 
-  ESTADO (M6): conexao, pool, timeouts, fachadas por familia, TLS,
-  MULTI/EXEC/WATCH e scripting Lua. Este programa exercita tudo de ponta a
-  ponta — handshake, Execute generico, pipeline, erro de servidor, binario,
-  RESP2 x RESP3, read timeout, pool, invalidacao de conexao, os comandos de
-  chaves, strings, hashes, listas, conjuntos e sorted sets (inclusive um
-  bloqueante), transacoes com check-and-set e EVAL/EVALSHA com cache de SHA.
-  O que ainda nao existe: pub/sub (M7), streams (M8).
+  ESTADO (M7): conexao, pool, timeouts, fachadas por familia, TLS,
+  MULTI/EXEC/WATCH, scripting Lua e pub/sub. Este programa exercita tudo de
+  ponta a ponta — handshake, Execute generico, pipeline, erro de servidor,
+  binario, RESP2 x RESP3, read timeout, pool, invalidacao de conexao, os
+  comandos de chaves, strings, hashes, listas, conjuntos e sorted sets
+  (inclusive um bloqueante), transacoes com check-and-set, EVAL/EVALSHA com
+  cache de SHA e assinatura de canais com thread de leitura.
+  O que ainda nao existe: streams (M8).
 
   COM --tls, o programa INTEIRO roda contra o listener cifrado (6380) em vez do
   de texto claro, e ganha uma secao dedicada ao TLS. Nao e' um modo separado com
@@ -44,6 +45,8 @@ uses
     {$ENDIF}
   {$ENDIF}
   SysUtils,
+  Classes,
+  SyncObjs,
   Redis.Threading,
   Redis.Transport,
   Redis.Types,
@@ -58,7 +61,9 @@ uses
   Redis.Commands.Sets,
   Redis.Commands.ZSets,
   Redis.Commands.Scripting,
+  Redis.Commands.PubSub,
   Redis.Transaction,
+  Redis.PubSub,
   Redis.Client;
 
 const
@@ -1058,6 +1063,223 @@ begin
   end;
 end;
 
+
+{ ---------------------------------------------------------------------------
+  Pub/Sub (M7). A unica parte da lib em que o servidor fala sem ser
+  perguntado: conexao dedicada, thread de leitura e callback. Vale reparar no
+  que o teste NAO consegue provar — que a mensagem chegou a quem estava fora do
+  ar: pub/sub e fire-and-forget, e o que se publica sem assinante evapora.
+  --------------------------------------------------------------------------- }
+type
+  { Guarda o que o callback recebeu. Ele roda na THREAD DE LEITURA, entao tudo
+    aqui passa por lock — e a espera e por condicao, nao por Sleep fixo. }
+  TColetorSmoke = class
+  private
+    FLock: TCriticalSection;
+    FItens: TStringList;
+    FUltimo: TBytes;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure Mensagem(ASender: TObject; const AMessage: TRedisPubSubMessage);
+    function Espera(ACount, ATimeoutMs: Integer): Boolean;
+    function Texto: string;
+    function Ultimo: TBytes;
+  end;
+
+constructor TColetorSmoke.Create;
+begin
+  inherited Create;
+  FLock := TCriticalSection.Create;
+  FItens := TStringList.Create;
+end;
+
+destructor TColetorSmoke.Destroy;
+begin
+  FItens.Free;
+  FLock.Free;
+  inherited Destroy;
+end;
+
+procedure TColetorSmoke.Mensagem(ASender: TObject;
+  const AMessage: TRedisPubSubMessage);
+begin
+  FLock.Enter;
+  try
+    FItens.Add(AMessage.Channel + '=' + AMessage.Text);
+    FUltimo := Copy(AMessage.Payload, 0, Length(AMessage.Payload));
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TColetorSmoke.Espera(ACount, ATimeoutMs: Integer): Boolean;
+var
+  LDeadline: UInt64;
+  LTem: Integer;
+begin
+  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  repeat
+    FLock.Enter;
+    try
+      LTem := FItens.Count;
+    finally
+      FLock.Leave;
+    end;
+    if LTem >= ACount then
+      Exit(True);
+    Sleep(5);
+  until RedisTickMs >= LDeadline;
+  Result := False;
+end;
+
+function TColetorSmoke.Texto: string;
+var
+  I: Integer;
+begin
+  Result := '';
+  FLock.Enter;
+  try
+    for I := 0 to FItens.Count - 1 do
+    begin
+      if I > 0 then
+        Result := Result + '|';
+      Result := Result + FItens[I];
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TColetorSmoke.Ultimo: TBytes;
+begin
+  FLock.Enter;
+  try
+    Result := Copy(FUltimo, 0, Length(FUltimo));
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure ExercitaPubSub;
+var
+  LClient: TRedisClient;
+  LSub, LSub2: TRedisSubscriber;
+  LColetor, LColetor2: TColetorSmoke;
+  LParams3: TRedisParams;
+  LBin: TBytes;
+  LCanal: string;
+  LContagem: TRedisChannelCountArray;
+  LLevantou: Boolean;
+begin
+  Secao('pub/sub');
+  LCanal := Chave('ps:noticias');
+  LClient := TRedisClient.Create(Params);
+  LColetor := TColetorSmoke.Create;
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.Start;
+    Passo('assinante conecta', LSub.Active and LSub.Connected);
+
+    LSub.Subscribe([LCanal]);
+    // O Subscribe so volta depois da confirmacao do servidor: nao ha corrida
+    // com o PUBLISH da linha seguinte.
+    Passo('SUBSCRIBE confirmado pelo servidor', LSub.SubscriptionCount = 1);
+
+    Passo('PUBLISH conta o assinante',
+      LClient.PubSub.Publish(LCanal, 'bom dia') = 1);
+    Passo('a mensagem chega no callback', LColetor.Espera(1, 5000));
+    Passo('com canal e conteudo certos',
+      LColetor.Texto = LCanal + '=bom dia', ' -> ' + LColetor.Texto);
+
+    { introspeccao }
+    LContagem := LClient.PubSub.CountSubscribers([LCanal, Chave('ps:ninguem')]);
+    Passo('PUBSUB NUMSUB ve o assinante',
+      (Length(LContagem) = 2) and (LContagem[0].Subscribers = 1));
+    // Canal sem assinante nao some da resposta: vem com zero.
+    Passo('e o canal sem ninguem vem com zero',
+      (Length(LContagem) = 2) and (LContagem[1].Subscribers = 0));
+
+    { binario }
+    LBin := MontaBytes([0, 13, 10, 255, 1, 65]);
+    LSub.Subscribe([Chave('ps:bin')]);
+    LClient.PubSub.Publish(Chave('ps:bin'), LBin);
+    Passo('mensagem binaria chega', LColetor.Espera(2, 5000));
+    Passo('com CRLF e byte zero intactos',
+      BytesIguais(LBin, LColetor.Ultimo));
+
+    { padrao }
+    LSub.PSubscribe([Chave('ps:p') + '.*']);
+    LClient.PubSub.Publish(Chave('ps:p') + '.esporte', 'gol');
+    Passo('PSUBSCRIBE recebe pelo padrao', LColetor.Espera(3, 5000));
+    // O pmessage traz o canal REAL, e nao o padrao que casou.
+    Passo('e a mensagem diz de qual canal veio',
+      Pos(Chave('ps:p') + '.esporte=gol', LColetor.Texto) > 0);
+
+    { em RESP2 o SUBSCRIBE sequestra a conexao }
+    LLevantou := False;
+    try
+      LSub.Execute('GET', [Chave('ps:x')]);
+    except
+      on E: ERedisPubSubError do
+        LLevantou := True;
+    end;
+    Passo('em RESP2, comando comum e recusado com assinatura ativa', LLevantou);
+    Passo('mas PING continua valendo', LSub.Ping);
+
+    { cancelar }
+    LSub.Unsubscribe([LCanal]);
+    Passo('UNSUBSCRIBE tira do servidor',
+      LClient.PubSub.Publish(LCanal, 'ninguem ouve') = 0);
+
+    { difusao para varios assinantes }
+    LColetor2 := TColetorSmoke.Create;
+    LSub2 := LClient.CreateSubscriber;
+    try
+      LSub2.OnMessage := LColetor2.Mensagem;
+      LSub2.Start;
+      LSub2.Subscribe([Chave('ps:fanout')]);
+      LSub.Subscribe([Chave('ps:fanout')]);
+      Passo('PUBLISH alcanca os dois assinantes',
+        LClient.PubSub.Publish(Chave('ps:fanout'), 'para todos') = 2);
+      // A quarta do primeiro coletor: bom dia, binaria, pelo padrao e esta.
+      Passo('e os dois recebem',
+        LColetor2.Espera(1, 5000) and LColetor.Espera(4, 5000));
+    finally
+      LSub2.Free;
+      LColetor2.Free;
+    end;
+  finally
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+
+  { RESP3: o push tem tipo proprio, entao a conexao NAO e sequestrada }
+  LParams3 := Params;
+  LParams3.Protocol := rpRESP3;
+  LClient := TRedisClient.Create(LParams3);
+  LColetor := TColetorSmoke.Create;
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.Start;
+    LSub.Subscribe([Chave('ps:resp3')]);
+    LSub.Execute('SET', [Chave('ps:v3'), 'valor']);
+    Passo('em RESP3 a conexao do assinante aceita comando comum',
+      LSub.Execute('GET', [Chave('ps:v3')]).AsString = 'valor');
+    LClient.PubSub.Publish(Chave('ps:resp3'), 'push');
+    Passo('e a mensagem continua chegando pela mesma conexao',
+      LColetor.Espera(1, 5000));
+    LClient.Keys.Del(Chave('ps:v3'));
+  finally
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
 procedure Limpa(AConn: TRedisConnection);
 var
   LPipe: TRedisPipeline;
@@ -1089,7 +1311,7 @@ begin
     LTextoTls := ' (nao exercitado; rode com --tls)';
   end;
 
-  WriteLn('pascal-redis-faa :: smoke test M6');
+  WriteLn('pascal-redis-faa :: smoke test M7');
   WriteLn('  alvo ......... ', HOST, ':', Params.Port, LTextoModo);
   WriteLn('  compilador ... ', {$IFDEF FPC} 'FPC ' + {$I %FPCVERSION%} {$ELSE} 'Delphi' {$ENDIF});
   WriteLn('  backend TLS .. ', RedisTlsBackendName, LTextoTls);
@@ -1120,6 +1342,7 @@ begin
   ExercitaPool;
   ExercitaFamilias;
   ExercitaTransacoes;
+  ExercitaPubSub;
   ExercitaInvalidacao;
 end;
 

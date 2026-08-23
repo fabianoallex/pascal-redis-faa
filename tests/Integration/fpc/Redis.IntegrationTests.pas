@@ -30,11 +30,12 @@
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Classes,
+  fpcunit, testregistry, SysUtils, Classes, SyncObjs,
   Redis.Types, Redis.Threading, Redis.Connection, Redis.Pool, Redis.Client,
   Redis.Commands, Redis.Commands.Keys, Redis.Commands.Strings,
   Redis.Commands.Hashes, Redis.Commands.Lists, Redis.Commands.Sets,
-  Redis.Commands.ZSets, Redis.Commands.Scripting, Redis.Transaction;
+  Redis.Commands.ZSets, Redis.Commands.Scripting, Redis.Commands.PubSub,
+  Redis.Transaction, Redis.PubSub;
 
 type
   { Roda comandos pelo pool numa thread propria. Guarda o erro em vez de
@@ -53,6 +54,30 @@ type
     constructor Create(APool: TRedisPool; AIndex, ARounds: Integer);
     property Ok: Integer read FOk;
     property Erro: string read FErro;
+  end;
+
+
+  { Coleta o que o assinante entregou. Os callbacks rodam na thread de leitura
+    do assinante, entao tudo aqui passa por lock — e a espera e' por condicao,
+    nunca por Sleep fixo, que renderia teste lento e instavel. }
+  TRedisMensagensRecebidas = class
+  private
+    FLock: TCriticalSection;
+    FItens: TStringList;
+    FUltimoPayload: TBytes;
+    FReconexoes: Integer;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure Mensagem(ASender: TObject; const AMessage: TRedisPubSubMessage);
+    procedure Reconectou(ASender: TObject);
+    /// Espera chegarem ACount mensagens; False se o prazo estourar.
+    function Espera(ACount, ATimeoutMs: Integer): Boolean;
+    function EsperaReconexao(ATimeoutMs: Integer): Boolean;
+    /// As mensagens na ordem, separadas por '|'.
+    function Texto: string;
+    function UltimoPayload: TBytes;
+    function Total: Integer;
   end;
 
   TRedisConnectionIntegrationTests = class(TTestCase)
@@ -133,6 +158,21 @@ type
     procedure ErroNoMeioDoBloco_NaoDesfazOsOutros;
     procedure Transacao_DevolveAConexaoAoPool;
     procedure WatchPendente_NaoContaminaAProximaTransacao;
+  end;
+
+
+  TRedisPubSubIntegrationTests = class(TTestCase)
+  published
+    procedure Publica_EAssinanteRecebe;
+    procedure PublishSemAssinante_DevolveZeroESePerde;
+    procedure Padrao_CasaVariosCanais;
+    procedure PubSubChannels_EnxergaAAssinatura;
+    procedure Unsubscribe_ParaDeReceber;
+    procedure PayloadBinario_SobreviveAoRoundTrip;
+    procedure VariosAssinantes_TodosRecebem;
+    procedure Resp2_ComandoComumComAssinatura_Levanta;
+    procedure Resp3_ConexaoContinuaUtilizavel;
+    procedure ConexaoDerrubada_ReconectaERefazAsAssinaturas;
   end;
 
   TRedisScriptingIntegrationTests = class(TTestCase)
@@ -1817,6 +1857,467 @@ begin
   end;
 end;
 
+{ TRedisMensagensRecebidas }
+
+constructor TRedisMensagensRecebidas.Create;
+begin
+  inherited Create;
+  FLock := TCriticalSection.Create;
+  FItens := TStringList.Create;
+end;
+
+destructor TRedisMensagensRecebidas.Destroy;
+begin
+  FItens.Free;
+  FLock.Free;
+  inherited Destroy;
+end;
+
+procedure TRedisMensagensRecebidas.Mensagem(ASender: TObject;
+  const AMessage: TRedisPubSubMessage);
+begin
+  FLock.Enter;
+  try
+    FItens.Add(AMessage.Channel + '=' + AMessage.Text);
+    FUltimoPayload := Copy(AMessage.Payload, 0, Length(AMessage.Payload));
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TRedisMensagensRecebidas.Reconectou(ASender: TObject);
+begin
+  FLock.Enter;
+  try
+    Inc(FReconexoes);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TRedisMensagensRecebidas.Espera(ACount, ATimeoutMs: Integer): Boolean;
+var
+  LDeadline: UInt64;
+begin
+  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  repeat
+    if Total >= ACount then
+      Exit(True);
+    Sleep(5);
+  until RedisTickMs >= LDeadline;
+  Result := False;
+end;
+
+function TRedisMensagensRecebidas.EsperaReconexao(ATimeoutMs: Integer): Boolean;
+var
+  LDeadline: UInt64;
+  LTem: Integer;
+begin
+  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  repeat
+    FLock.Enter;
+    try
+      LTem := FReconexoes;
+    finally
+      FLock.Leave;
+    end;
+    if LTem > 0 then
+      Exit(True);
+    Sleep(10);
+  until RedisTickMs >= LDeadline;
+  Result := False;
+end;
+
+function TRedisMensagensRecebidas.Texto: string;
+var
+  I: Integer;
+begin
+  Result := '';
+  FLock.Enter;
+  try
+    for I := 0 to FItens.Count - 1 do
+    begin
+      if I > 0 then
+        Result := Result + '|';
+      Result := Result + FItens[I];
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TRedisMensagensRecebidas.UltimoPayload: TBytes;
+begin
+  FLock.Enter;
+  try
+    Result := Copy(FUltimoPayload, 0, Length(FUltimoPayload));
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TRedisMensagensRecebidas.Total: Integer;
+begin
+  FLock.Enter;
+  try
+    Result := FItens.Count;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+{ TRedisPubSubIntegrationTests }
+
+// Nome de canal do teste. Canal nao e' chave: some sozinho quando o ultimo
+// assinante sai, entao nao entra na limpeza.
+function Canal(const ASufixo: string): string;
+begin
+  Result := PREFIXO + 'canal:' + ASufixo;
+end;
+
+// Espera o servidor contar ACount assinantes no canal. Depois de uma
+// reconexao o SUBSCRIBE de volta ainda pode estar a caminho, e quem sabe
+// quando ele valeu e' o servidor.
+function EsperaAssinantes(AClient: TRedisClient; const ACanal: string;
+  ACount, ATimeoutMs: Integer): Boolean;
+var
+  LDeadline: UInt64;
+  LContagem: TRedisChannelCountArray;
+begin
+  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  repeat
+    LContagem := AClient.PubSub.CountSubscribers([ACanal]);
+    if (Length(LContagem) = 1) and (LContagem[0].Subscribers >= ACount) then
+      Exit(True);
+    Sleep(10);
+  until RedisTickMs >= LDeadline;
+  Result := False;
+end;
+
+procedure TRedisPubSubIntegrationTests.Publica_EAssinanteRecebe;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LColetor: TRedisMensagensRecebidas;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LColetor := TRedisMensagensRecebidas.Create;
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.Start;
+    LSub.Subscribe([Canal('a')]);
+    // O Subscribe so' volta depois da confirmacao do servidor: quando o
+    // PUBLISH abaixo sai, o assinante JA' esta' inscrito. Sem essa garantia o
+    // teste seria uma corrida disfarcada de teste.
+    TAssert.AssertEquals('um assinante recebeu', Int64(1),
+      LClient.PubSub.Publish(Canal('a'), 'bom dia'));
+    TAssert.AssertTrue('a mensagem chegou', LColetor.Espera(1, 5000));
+    TAssert.AssertEquals(Canal('a') + '=bom dia', LColetor.Texto);
+  finally
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.PublishSemAssinante_DevolveZeroESePerde;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LColetor: TRedisMensagensRecebidas;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LColetor := TRedisMensagensRecebidas.Create;
+  try
+    // Pub/sub e' fire-and-forget: sem assinante no ar, a mensagem evapora.
+    // Nao ha' fila esperando alguem chegar — e' a diferenca para Streams.
+    TAssert.AssertEquals('ninguem recebeu', Int64(0),
+      LClient.PubSub.Publish(Canal('perdida'), 'ninguem ouviu'));
+
+    LSub := LClient.CreateSubscriber;
+    try
+      LSub.OnMessage := LColetor.Mensagem;
+      LSub.Start;
+      LSub.Subscribe([Canal('perdida')]);
+      // Chegou depois: a mensagem anterior nao volta.
+      TAssert.AssertFalse('nada foi entregue com atraso',
+        LColetor.Espera(1, 500));
+    finally
+      LSub.Free;
+    end;
+  finally
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.Padrao_CasaVariosCanais;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LColetor: TRedisMensagensRecebidas;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LColetor := TRedisMensagensRecebidas.Create;
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.Start;
+    LSub.PSubscribe([Canal('p') + '.*']);
+    LClient.PubSub.Publish(Canal('p') + '.um', 'primeiro');
+    LClient.PubSub.Publish(Canal('p') + '.dois', 'segundo');
+    TAssert.AssertTrue('chegaram as duas', LColetor.Espera(2, 5000));
+    // O pmessage traz o canal REAL, nao o padrao: e' o que permite ramificar.
+    TAssert.AssertEquals(Canal('p') + '.um=primeiro|' +
+      Canal('p') + '.dois=segundo', LColetor.Texto);
+    TAssert.AssertTrue('o servidor conta o padrao',
+      LClient.PubSub.NumPatterns >= 1);
+  finally
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.PubSubChannels_EnxergaAAssinatura;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LCanais: TRedisStringArray;
+  LContagem: TRedisChannelCountArray;
+  I: Integer;
+  LAchou: Boolean;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.Start;
+    LSub.Subscribe([Canal('visivel')]);
+
+    LCanais := LClient.PubSub.ActiveChannels(PREFIXO + '*');
+    LAchou := False;
+    for I := 0 to High(LCanais) do
+      if LCanais[I] = Canal('visivel') then
+        LAchou := True;
+    TAssert.AssertTrue('o canal aparece no PUBSUB CHANNELS', LAchou);
+
+    LContagem := LClient.PubSub.CountSubscribers([Canal('visivel'),
+      Canal('ninguem')]);
+    TAssert.AssertEquals(2, Length(LContagem));
+    TAssert.AssertEquals(Canal('visivel'), LContagem[0].Channel);
+    TAssert.AssertEquals(Int64(1), LContagem[0].Subscribers);
+    // Canal sem assinante nenhum nao some da resposta: vem com zero.
+    TAssert.AssertEquals(Canal('ninguem'), LContagem[1].Channel);
+    TAssert.AssertEquals(Int64(0), LContagem[1].Subscribers);
+  finally
+    LSub.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.Unsubscribe_ParaDeReceber;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LColetor: TRedisMensagensRecebidas;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LColetor := TRedisMensagensRecebidas.Create;
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.Start;
+    LSub.Subscribe([Canal('sai')]);
+    LClient.PubSub.Publish(Canal('sai'), 'antes');
+    TAssert.AssertTrue('chegou a primeira', LColetor.Espera(1, 5000));
+
+    LSub.Unsubscribe([Canal('sai')]);
+    // O servidor ja' esqueceu a assinatura: nao ha' mais para quem entregar.
+    TAssert.AssertEquals('sem assinantes', Int64(0),
+      LClient.PubSub.Publish(Canal('sai'), 'depois'));
+    TAssert.AssertFalse('e nada chegou', LColetor.Espera(2, 500));
+    TAssert.AssertEquals(0, LSub.SubscriptionCount);
+  finally
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.PayloadBinario_SobreviveAoRoundTrip;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LColetor: TRedisMensagensRecebidas;
+  LBin: TBytes;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LColetor := TRedisMensagensRecebidas.Create;
+  LSub := LClient.CreateSubscriber;
+  try
+    // Byte zero e CRLF no meio: mensagem de pub/sub e' binaria como qualquer
+    // valor do Redis, e o caminho inteiro (PUBLISH, push, callback) tem de
+    // preservar isso.
+    LBin := MakeBytes([0, 13, 10, 255, 1, 65]);
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.Start;
+    LSub.Subscribe([Canal('bin')]);
+    LClient.PubSub.Publish(Canal('bin'), LBin);
+    TAssert.AssertTrue('chegou', LColetor.Espera(1, 5000));
+    TAssert.AssertEquals(Hex(LBin), Hex(LColetor.UltimoPayload));
+  finally
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.VariosAssinantes_TodosRecebem;
+var
+  LClient: TRedisClient;
+  LSub1, LSub2: TRedisSubscriber;
+  LColetor1, LColetor2: TRedisMensagensRecebidas;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LColetor1 := TRedisMensagensRecebidas.Create;
+  LColetor2 := TRedisMensagensRecebidas.Create;
+  LSub1 := LClient.CreateSubscriber;
+  LSub2 := LClient.CreateSubscriber;
+  try
+    LSub1.OnMessage := LColetor1.Mensagem;
+    LSub2.OnMessage := LColetor2.Mensagem;
+    LSub1.Start;
+    LSub2.Start;
+    LSub1.Subscribe([Canal('fanout')]);
+    LSub2.Subscribe([Canal('fanout')]);
+    // Pub/sub e' difusao: uma publicacao, N entregas. O retorno do PUBLISH e'
+    // a unica confirmacao que existe, e conta quem estava ouvindo AGORA.
+    TAssert.AssertEquals('os dois receberam', Int64(2),
+      LClient.PubSub.Publish(Canal('fanout'), 'para todos'));
+    TAssert.AssertTrue('o primeiro', LColetor1.Espera(1, 5000));
+    TAssert.AssertTrue('o segundo', LColetor2.Espera(1, 5000));
+  finally
+    LSub1.Free;
+    LSub2.Free;
+    LColetor1.Free;
+    LColetor2.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.Resp2_ComandoComumComAssinatura_Levanta;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LLevantou: Boolean;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.Start;
+    // Sem assinatura ativa a conexao RESP2 ainda e' comum.
+    TAssert.AssertTrue('PING antes de assinar', LSub.Ping);
+    LSub.Subscribe([Canal('resp2')]);
+    LLevantou := False;
+    try
+      LSub.Execute('GET', [Chave('resp2')]);
+    except
+      on E: ERedisPubSubError do
+        LLevantou := True;
+    end;
+    // O servidor recusaria de qualquer jeito; recusar aqui rende uma mensagem
+    // que diz o que fazer, em vez de um erro cru do Redis.
+    TAssert.AssertTrue('comando comum e recusado antes de ir ao fio',
+      LLevantou);
+    // PING continua valendo: e' um dos comandos que o servidor aceita.
+    TAssert.AssertTrue('PING com assinatura ativa', LSub.Ping);
+  finally
+    LSub.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.Resp3_ConexaoContinuaUtilizavel;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LColetor: TRedisMensagensRecebidas;
+  LParams: TRedisParams;
+begin
+  LParams := ParamsDeTeste;
+  LParams.Protocol := rpRESP3;
+  LClient := TRedisClient.Create(LParams);
+  LColetor := TRedisMensagensRecebidas.Create;
+  LSub := LClient.CreateSubscriber;
+  try
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.Start;
+    LSub.Subscribe([Canal('resp3')]);
+
+    // O ganho do RESP3: a mensagem vem por um tipo proprio (push), entao a
+    // conexao NAO e' sequestrada e continua aceitando comando comum. Em RESP2
+    // esta linha levantaria.
+    LSub.Execute('SET', [Chave('resp3'), 'valor']);
+    TAssert.AssertEquals('valor',
+      LSub.Execute('GET', [Chave('resp3')]).AsString);
+
+    // E as mensagens continuam chegando pela mesma conexao.
+    LClient.PubSub.Publish(Canal('resp3'), 'push');
+    TAssert.AssertTrue('a mensagem chegou', LColetor.Espera(1, 5000));
+    TAssert.AssertEquals(Canal('resp3') + '=push', LColetor.Texto);
+
+    LClient.Keys.Del(Chave('resp3'));
+  finally
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisPubSubIntegrationTests.ConexaoDerrubada_ReconectaERefazAsAssinaturas;
+var
+  LClient: TRedisClient;
+  LSub: TRedisSubscriber;
+  LColetor: TRedisMensagensRecebidas;
+  LCarrasco: TRedisConnection;
+  LId: Int64;
+begin
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  LColetor := TRedisMensagensRecebidas.Create;
+  LSub := LClient.CreateSubscriber;
+  LCarrasco := nil;
+  try
+    LSub.ReconnectDelayMs := 100;
+    LSub.OnMessage := LColetor.Mensagem;
+    LSub.OnReconnected := LColetor.Reconectou;
+    LSub.Start;
+    // CLIENT ID antes de assinar: em RESP2 a conexao ainda aceita comando
+    // comum, e depois do SUBSCRIBE nao aceitaria mais.
+    LId := LSub.Execute('CLIENT', ['ID']).AsInteger;
+    LSub.Subscribe([Canal('recon')]);
+
+    // Derruba a conexao do assinante pelo lado do servidor — o que acontece
+    // de verdade num restart ou num failover.
+    LCarrasco := AbreConexao;
+    LCarrasco.Execute('CLIENT', ['KILL', 'ID', LId]);
+
+    TAssert.AssertTrue('reconectou sozinho', LColetor.EsperaReconexao(15000));
+    // A unica topologia que o Redis tem para replayar sao as assinaturas — e
+    // quem confirma que elas voltaram e' o SERVIDOR, nao o cliente.
+    TAssert.AssertTrue('o servidor ve a assinatura de novo',
+      EsperaAssinantes(LClient, Canal('recon'), 1, 15000));
+    TAssert.AssertEquals('um assinante recebeu', Int64(1),
+      LClient.PubSub.Publish(Canal('recon'), 'depois da queda'));
+    TAssert.AssertTrue('e a mensagem chegou', LColetor.Espera(1, 5000));
+  finally
+    LCarrasco.Free;
+    LSub.Free;
+    LColetor.Free;
+    LClient.Free;
+  end;
+end;
+
 initialization
   RegisterTest(TRedisConnectionIntegrationTests);
   RegisterTest(TRedisPoolIntegrationTests);
@@ -1828,6 +2329,7 @@ initialization
   RegisterTest(TRedisSetsIntegrationTests);
   RegisterTest(TRedisZSetsIntegrationTests);
   RegisterTest(TRedisTransactionIntegrationTests);
+  RegisterTest(TRedisPubSubIntegrationTests);
   RegisterTest(TRedisScriptingIntegrationTests);
 
 end.

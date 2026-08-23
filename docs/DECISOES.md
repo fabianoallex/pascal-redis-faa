@@ -702,6 +702,173 @@ várias threads podem estar estreando o mesmo script ao mesmo tempo.
 
 ---
 
+## 37. O kernel ganhou um modo full-duplex — e ele falha de outro jeito (M7)
+
+Até o M6 a conexão só sabia fazer uma coisa: escrever um comando e ler a
+resposta dele, na mesma thread, sob o lock. Pub/sub não cabe nisso — o servidor
+fala sozinho —, então `TRedisConnection` ganhou duas rotinas que quebram o par
+de propósito:
+
+- **`Send`** escreve e **não** lê. Pega o lock, como o `Execute`.
+- **`Receive`** lê **sem** ter escrito, e **não pega o lock**. Se pegasse, um
+  canal em silêncio (o estado normal de um assinante) impediria qualquer
+  `SUBSCRIBE` novo de sair, porque a thread de leitura estaria segurando o lock
+  parada num `recv`.
+
+Duas invariantes do kernel mudam **só nesse modo**, e as duas por causa da
+segunda thread:
+
+- **Sobra no buffer não é conexão suja.** No modo pergunta-resposta, byte
+  sobrando depois da resposta significa contaminação (seção 18). Em pub/sub
+  significa que chegaram duas mensagens numa leitura só — o funcionamento
+  normal. A checagem de `IsDirty` fica desligada ali.
+- **A falha não faz faxina.** `MarkBroken` libera reader, stream e socket, e
+  isso é seguro quando existe uma thread só. Com duas, liberar puxaria o tapete
+  de quem estivesse no meio de um `Send`. No modo full-duplex a falha apenas
+  marca a conexão e **fecha o socket** — que é o que desbloqueia a leitura
+  pendurada da outra thread. É a mesma escolha do `Abort` (seção 19), pelo mesmo
+  motivo. A liberação de verdade acontece no `Close`/destrutor, depois que a
+  thread de leitura terminou.
+
+Misturar `Execute` com `Send`/`Receive` na mesma conexão dessincroniza o fluxo —
+o `Execute` leria a próxima mensagem publicada achando que é a resposta dele. É
+por isso que essas rotinas existem para uma unidade só: a `Redis.PubSub`.
+
+---
+
+## 38. A conexão de pub/sub não tem read timeout, e quem a desbloqueia é o `Abort` (M7)
+
+Um canal pode ficar horas sem publicar nada. Se a conexão do assinante tivesse
+`ReceiveTimeoutMs`, o silêncio viraria `ERedisTimeout` e a conexão seria
+descartada — e com razão, porque no modo pergunta-resposta timeout significa
+"desisti, mas a resposta ainda vem a caminho" (seção 22). Só que aqui não há
+resposta a caminho: não houve pergunta. Então o assinante **zera** o read
+timeout ao abrir a sua conexão.
+
+Isso transfere o problema do relógio para o `Stop`: sem timeout, a thread fica
+parada no `recv` para sempre. Quem a acorda é o `Abort`, que derruba o socket
+sem pegar o lock — exatamente o caso de uso para o qual ele foi escrito no M2. A
+sequência do `Stop` é sinalizar, abortar, esperar a thread morrer e só então
+liberar a conexão.
+
+**O que fica em aberto, e é limitação conhecida:** conexão que morre em silêncio
+(cabo arrancado, NAT que esqueceu a sessão) não é detectada até o TCP desistir,
+porque o Redis não tem heartbeat como o AMQP. Quem precisa detectar mais cedo
+chama `TRedisSubscriber.Ping` de um timer da aplicação — é uma linha, e é
+melhor do que a lib decidir sozinha um intervalo que serve para todo mundo.
+
+---
+
+## 39. O callback roda na thread de leitura, em ordem (M7)
+
+O `OnMessage` é chamado **na thread de leitura**, uma mensagem por vez, na ordem
+em que chegaram. A alternativa era despachar por `RedisPool` (o thread pool que
+a lib já tem) e ganhar vazão. Não foi escolhida:
+
+- **Ordem é o único compromisso que o pub/sub do Redis realmente cumpre.** Não
+  há entrega garantida, não há confirmação, não há repetição — mas o que chega,
+  chega na ordem em que foi publicado. Espalhar as mensagens por N workers
+  entregaria "3, 1, 2" sem aviso nenhum, e um bug desses aparece em produção,
+  nunca no teste.
+- A vazão que se ganharia é a de um cliente que não dá conta de ler o próprio
+  socket — cenário em que o remédio certo é a aplicação enfileirar, e não a lib
+  paralelizar por ela.
+
+O preço está documentado no contrato do `OnMessage`: **callback lento segura o
+socket**. Trabalho pesado deve ir para uma fila da aplicação.
+
+Duas consequências que a lib trata sozinha:
+
+- **Exceção do callback não derruba a conexão.** Ela vai para o `OnError` e a
+  próxima mensagem é entregue normalmente. Deixar subir transformaria todo bug
+  da aplicação numa reconexão.
+- **`Execute` de dentro do callback é recusado na hora**, com mensagem
+  explicando. Quem leria a resposta é justamente a thread que está rodando o
+  callback: sem essa guarda, a chamada travaria até o `CommandTimeoutMs` e o
+  diagnóstico seria "o Redis está lento".
+
+---
+
+## 40. `Subscribe` espera a confirmação do servidor (M7)
+
+`SUBSCRIBE` é assíncrono no protocolo: o comando vai, e a confirmação volta pelo
+mesmo fluxo das mensagens. A lib podia devolver na hora e deixar a confirmação
+chegar quando chegasse — mas aí este teste (e o código de qualquer aplicação
+que publica logo depois de assinar) seria uma corrida disfarçada:
+
+```pascal
+LSub.Subscribe(['noticias']);
+LClient.PubSub.Publish('noticias', 'oi');   // chega? depende do escalonador
+```
+
+Então `Subscribe` **espera** a confirmação, e o que ele espera é o **estado**
+(o canal aparecer na lista confirmada), não uma contagem de mensagens — assim o
+resultado não depende de quantas confirmações chegaram nem da ordem delas.
+
+Duas exceções, as duas por impossibilidade e não por conveniência:
+
+- **De dentro do callback não espera.** Quem confirmaria é a thread que está
+  rodando o callback. A assinatura sai, e a confirmação chega adiante no laço.
+- **Com a conexão caída e `AutoReconnect` ligado, registra e volta.** A
+  assinatura fica na lista de desejadas e vai ao fio quando a conexão voltar.
+  Com `AutoReconnect` desligado, levanta.
+
+A lib mantém duas listas por tipo de assinatura: o que a **aplicação pediu** (é
+o que a reconexão reenvia) e o que o **servidor confirmou** (é o que
+`Channels`/`Patterns`/`ShardChannels` devolvem, e o que a queda zera). Uma lista
+só não daria conta: ao cair, ela teria de ser esvaziada — e aí não sobraria nada
+para replayar.
+
+---
+
+## 41. Em RESP2, a lib recusa o comando que o servidor recusaria (M7)
+
+Numa conexão RESP2 com assinatura ativa, o Redis só aceita os comandos de
+assinatura, `PING`, `RESET` e `QUIT`. Qualquer outro responde um erro que fala
+do protocolo, não do que fazer a respeito. O `TRedisSubscriber.Execute` recusa
+**antes de ir ao fio**, com uma mensagem que nomeia a saída: usar outra conexão
+(o pool do `TRedisClient`) ou negociar RESP3.
+
+Isso vale só quando há assinatura ativa — antes do primeiro `SUBSCRIBE` a
+conexão RESP2 ainda é comum, e é o que permite ler o `CLIENT ID` do assinante
+antes de assinar (o teste de reconexão faz exatamente isso).
+
+Em **RESP3** não há restrição nenhuma: a mensagem chega com tipo próprio
+(push, `>`) e a conexão continua servindo comando comum. É o ganho concreto do
+`HELLO 3` aqui, e o que separa os dois mundos na thread de leitura é uma linha:
+em RESP3, **só** o que vem como push é tráfego de pub/sub; o resto é resposta
+de comando e vai para quem estiver esperando.
+
+Em RESP2 não existe essa marca, e a classificação é pela forma do array. Três
+perguntas, não uma: o verbo bate, a aridade bate, e — nas confirmações — o
+terceiro item é mesmo um inteiro. A terceira existe por um caso real: um
+`PUBSUB CHANNELS` pode devolver três canais, o primeiro chamado `subscribe`.
+Sem a checagem do inteiro, isso viraria uma confirmação fantasma.
+
+---
+
+## 42. A reconexão replaya as assinaturas — e só elas (M7)
+
+Assinatura é o **único** estado que o pub/sub deixa no servidor, e por isso é a
+única coisa que a reconexão do assinante refaz (além do handshake:
+`HELLO`/`AUTH`, `CLIENT SETNAME`, `SELECT`). Não há comando em voo para repetir
+— e continua valendo a decisão do M2 de não repetir nada.
+
+O que a reconexão **não** recupera é a mensagem publicada enquanto a conexão
+esteve fora: ela se perdeu, ponto. Pub/sub é fire-and-forget, o `PUBLISH`
+devolve quantos assinantes receberam **naquele instante**, e zero significa que
+a mensagem evaporou — não que ficou guardada esperando alguém assinar. Quem
+precisa de entrega garantida usa Streams com consumer group (M8). A lib não
+tenta suavizar isso com fila local: uma fila no cliente daria a impressão de
+durabilidade que o servidor não oferece.
+
+Um assinante criado sobre uma conexão pronta (`CreateOnConnection`) **não**
+reconecta, e o `AutoReconnect` dele nasce False: aquela conexão pode nem ser de
+socket — as suítes de teste passam uma sobre `TStream` —, e reabrir por conta
+própria sairia conectando em outro lugar.
+
+---
+
 ## Compatibilidade e nomenclatura
 
 A lib fala RESP, não depende da implementação: funciona com **Redis**, **Valkey**, **KeyDB**

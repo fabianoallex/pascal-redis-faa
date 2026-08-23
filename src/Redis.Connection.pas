@@ -11,7 +11,13 @@
   ordem exata dos comandos — entao a propria thread que chamou Execute escreve
   o comando e le a resposta, segurando o lock da conexao. Zero handoff entre
   threads, zero fila de correlacao, e o erro de I/O chega em quem pode decidir o
-  que fazer com ele. Thread de leitura so' existira' no pub/sub (M7).
+  que fazer com ele.
+
+  A UNICA excecao e' o pub/sub (M7), onde o servidor fala sem ser perguntado:
+  para ele existem Send (escreve e nao le) e Receive (le sem ter escrito), e
+  uma thread de leitura dedicada — que vive na Redis.PubSub, nao aqui. As duas
+  rotinas estao documentadas mais abaixo; o resto desta unit nao muda por causa
+  delas.
 
   As tres regras que a conexao aplica sozinha (ver docs/DECISOES.md):
 
@@ -129,6 +135,19 @@ type
     function ToBytes: TBytes;
   end;
 
+  /// Como a conexao esta' sendo usada no momento — e o que fazer quando ela
+  /// morre.
+  ///
+  /// xmRequestReply e' o modo normal: uma thread escreve, a mesma thread le,
+  /// tudo sob o lock. Ali sobra de buffer significa contaminacao e a falha
+  /// pode liberar reader e stream na hora, porque ninguem mais os esta' usando.
+  ///
+  /// xmFullDuplex e' o modo do pub/sub: a thread de leitura fica parada no
+  /// Receive enquanto outra thread manda SUBSCRIBE. Ali o servidor fala
+  /// sozinho (byte sobrando no buffer e' mensagem, nao contaminacao) e a
+  /// falha NAO pode liberar nada — so' derrubar o socket, como o Abort faz.
+  TRedisExchangeMode = (xmRequestReply, xmFullDuplex);
+
   /// Uma conexao com o servidor.
   ///
   /// Ciclo de vida: Create -> Open -> Execute* -> Close/Free. Depois de
@@ -166,12 +185,20 @@ type
     procedure Teardown;
     procedure Handshake;
     procedure MarkBroken;
+    /// Invalida a conexao do jeito que o modo de uso permite (ver
+    /// TRedisExchangeMode).
+    procedure MarkLost(AMode: TRedisExchangeMode);
     procedure EnsureUsable;
     procedure WriteAll(const ABytes: TBytes);
-    /// Escreve ACount comandos ja' codificados e le ACount respostas, mapeando
-    /// qualquer falha de I/O para invalidacao + excecao da lib. NAO pega o
-    /// lock e NAO levanta erro de servidor — isso e' com quem chama.
+    /// Escreve (se AWrite) e le ACount respostas, mapeando qualquer falha de
+    /// I/O para invalidacao + excecao da lib. NAO pega o lock e NAO levanta
+    /// erro de servidor — isso e' com quem chama.
+    function Exchange(const ABytes: TBytes; AWrite: Boolean; ACount: Integer;
+      AMode: TRedisExchangeMode): TRedisReplyArray;
+    /// Escreve ACount comandos ja' codificados e le ACount respostas, no modo
+    /// pergunta-resposta.
     function Perform(const ABytes: TBytes; ACount: Integer): TRedisReplyArray;
+    procedure SendEncoded(const ABytes: TBytes);
     function HandshakeStep(const ABytes: TBytes): IRedisReply;
     function GetIsUsable: Boolean;
   public
@@ -231,6 +258,35 @@ type
     /// todos de qualquer jeito. Cada item pode ser um rkError; use
     /// IsError/RaiseIfError item a item.
     function ExecutePipeline(APipeline: TRedisPipeline): TRedisReplyArray;
+
+    { --- Modo full-duplex: uma thread escreve, outra le (pub/sub, M7) ---
+
+      Send e Receive quebram de proposito o par pergunta-resposta que o resto
+      da classe mantem, e sao o UNICO jeito de falar com um servidor que
+      responde sem ser perguntado. Fora do pub/sub nao ha' motivo para usa-los:
+      misturar Send/Receive com Execute na mesma conexao dessincroniza o fluxo,
+      porque o Execute leria a proxima mensagem publicada achando que e' a
+      resposta dele.
+
+      A divisao de trabalho e' fixa: UMA thread chama Receive em laco; as
+      demais so' chamam Send. Ver Redis.PubSub, que e' quem os usa. }
+
+    /// Envia um comando e NAO le a resposta — ela chegara' na thread que
+    /// estiver no Receive. Serializado pelo lock, como o Execute.
+    procedure Send(const AName: string; const AArgs: array of TRedisArg); overload;
+    procedure Send(const AName: string); overload;
+    /// Como Send, com o nome do comando dentro do array.
+    procedure SendArgs(const AArgs: array of TRedisArg);
+
+    /// Le UMA resposta sem ter enviado nada, bloqueando ate' ela chegar.
+    ///
+    /// NAO pega o lock (senao um canal em silencio impediria qualquer
+    /// SUBSCRIBE novo de sair) e nao marca a conexao como suja: aqui, byte
+    /// sobrando no buffer e' a proxima mensagem, nao contaminacao. Falha de
+    /// I/O invalida a conexao e levanta ERedisConnectionLost, mas sem liberar
+    /// reader nem stream — a thread que estiver escrevendo pode estar usando
+    /// os dois.
+    function Receive: IRedisReply;
 
     /// PING. Devolve True se o servidor respondeu PONG. Nao levanta em erro de
     /// servidor (mas levanta se a conexao morreu) — e' o health check que o
@@ -544,6 +600,26 @@ begin
   Teardown;
 end;
 
+procedure TRedisConnection.MarkLost(AMode: TRedisExchangeMode);
+begin
+  if AMode = xmRequestReply then
+  begin
+    MarkBroken;
+    Exit;
+  end;
+  // Full-duplex (pub/sub): ha' DUAS threads na conexao, uma lendo e outra
+  // capaz de escrever, e a que falhou nao sabe onde a outra esta'. Liberar
+  // reader e stream aqui puxaria o tapete de quem estivesse no meio de um
+  // Send — e' o mesmo motivo pelo qual o Abort so' derruba o socket. Marca e
+  // fecha o socket (que desbloqueia a leitura pendurada da outra thread); a
+  // faxina fica para o Close ou o destrutor, chamados depois que a thread de
+  // leitura terminou.
+  FBroken := True;
+  FOpen := False;
+  if FSocket <> nil then
+    FSocket.Close;
+end;
+
 procedure TRedisConnection.EnsureUsable;
 begin
   if FBroken then
@@ -568,15 +644,16 @@ begin
   end;
 end;
 
-function TRedisConnection.Perform(const ABytes: TBytes;
-  ACount: Integer): TRedisReplyArray;
+function TRedisConnection.Exchange(const ABytes: TBytes; AWrite: Boolean;
+  ACount: Integer; AMode: TRedisExchangeMode): TRedisReplyArray;
 var
   I: Integer;
 begin
   Result := nil;
   SetLength(Result, ACount);
   try
-    WriteAll(ABytes);
+    if AWrite then
+      WriteAll(ABytes);
     for I := 0 to ACount - 1 do
       Result[I] := FReader.ReadReply;
     // Invariante da conexao limpa: lidas todas as respostas esperadas, o
@@ -584,7 +661,11 @@ begin
     // anterior (o caso classico: comando que sofreu timeout e cuja resposta
     // chegou depois), e o proximo Execute leria essa sobra achando que e' a
     // resposta dele. Nao da' para consertar — da' para nao propagar.
-    if FReader.Buffered > 0 then
+    //
+    // No modo full-duplex (pub/sub) a checagem NAO vale: ali o servidor fala
+    // sozinho, e varias mensagens chegando numa leitura so' e' o
+    // funcionamento normal, nao contaminacao.
+    if (AMode = xmRequestReply) and (FReader.Buffered > 0) then
       FDirty := True;
   except
     on E: ERedisReplyError do
@@ -593,17 +674,17 @@ begin
       raise;
     on E: ERedisProtocolError do
     begin
-      MarkBroken;  // fluxo dessincronizado: nao ha' como reencontrar o comeco
+      MarkLost(AMode);  // fluxo dessincronizado: nao ha' como reencontrar o comeco
       raise;
     end;
     on E: ERedisConnectionLost do
     begin
-      MarkBroken;
+      MarkLost(AMode);
       raise;
     end;
     on E: ERedisTimeout do
     begin
-      MarkBroken;
+      MarkLost(AMode);
       raise;
     end;
     on E: ERedisTransportTimeout do
@@ -613,7 +694,7 @@ begin
       // caiu" de "o servidor esta lento demais" para decidir se aumenta o
       // timeout ou se investiga o servidor. E a conexao vai embora nos dois
       // casos, porque a resposta atrasada ainda pode chegar.
-      MarkBroken;
+      MarkLost(AMode);
       raise ERedisTimeout.CreateFmt('%s (host %s:%d)',
         [E.Message, FParams.Host, FParams.Port]);
     end;
@@ -623,10 +704,57 @@ begin
       // socket da RTL). Do ponto de vista de quem chamou e' tudo a mesma
       // coisa: o comando nao completou e a conexao acabou. Traduzir aqui
       // poupa o chamador de conhecer as excecoes das camadas de baixo.
-      MarkBroken;
+      MarkLost(AMode);
       raise ERedisConnectionLost.CreateFmt('%s: %s', [E.ClassName, E.Message]);
     end;
   end;
+end;
+
+function TRedisConnection.Perform(const ABytes: TBytes;
+  ACount: Integer): TRedisReplyArray;
+begin
+  Result := Exchange(ABytes, True, ACount, xmRequestReply);
+end;
+
+procedure TRedisConnection.Send(const AName: string;
+  const AArgs: array of TRedisArg);
+begin
+  SendEncoded(RedisEncodeCommand(AName, AArgs));
+end;
+
+procedure TRedisConnection.Send(const AName: string);
+begin
+  Send(AName, []);
+end;
+
+procedure TRedisConnection.SendArgs(const AArgs: array of TRedisArg);
+begin
+  SendEncoded(RedisEncodeCommand(AArgs));
+end;
+
+procedure TRedisConnection.SendEncoded(const ABytes: TBytes);
+begin
+  FLock.Enter;
+  try
+    EnsureUsable;
+    // Escreve e nao le nada: a resposta e' problema da thread de leitura.
+    Exchange(ABytes, True, 0, xmFullDuplex);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TRedisConnection.Receive: IRedisReply;
+var
+  LReplies: TRedisReplyArray;
+begin
+  // De proposito SEM o lock: quem le e' a thread de pub/sub, e ela fica
+  // parada aqui por minutos. Pegar o lock impediria o Send de outra thread
+  // (um SUBSCRIBE novo) de sair enquanto o canal estivesse em silencio — que
+  // e' o estado normal de uma conexao de pub/sub.
+  EnsureUsable;
+  LReplies := Exchange(nil, False, 1, xmFullDuplex);
+  Result := LReplies[0];
 end;
 
 function TRedisConnection.HandshakeStep(const ABytes: TBytes): IRedisReply;

@@ -74,8 +74,16 @@
         <UnitName Value="Redis.Commands.Scripting"/>
       </Item>
       <Item>
+        <Filename Value="..\src\Redis.Commands.PubSub.pas"/>
+        <UnitName Value="Redis.Commands.PubSub"/>
+      </Item>
+      <Item>
         <Filename Value="..\src\Redis.Transaction.pas"/>
         <UnitName Value="Redis.Transaction"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\Redis.PubSub.pas"/>
+        <UnitName Value="Redis.PubSub"/>
       </Item>
       <Item>
         <Filename Value="..\src\Redis.Client.pas"/>

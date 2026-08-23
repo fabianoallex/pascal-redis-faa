@@ -167,7 +167,7 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
 
 ## Estrutura de units
 
-Existentes (M0 + M1 + M2 + M3 + M4):
+Existentes (M0 a M7):
 
 ```
 src/redis.inc
@@ -177,7 +177,7 @@ src/Redis.Transport.Tls.pas      (cópia renomeada)
 src/Redis.Transport.OpenSSL.pas  (cópia renomeada)
 src/Redis.Types.pas              TRedisReplyKind, IRedisReply, TRedisArg, excecoes, params, Utf8Encode/Decode
 src/Redis.Resp.pas               codec RESP2/RESP3: RedisEncodeCommand, TRedisReader, IRedisByteSource
-src/Redis.Connection.pas         TRedisConnection (1 socket, handshake, Execute/ExecuteRaw), TRedisPipeline, TRedisSocketStream
+src/Redis.Connection.pas         TRedisConnection (1 socket, handshake, Execute/ExecuteRaw, Send/Receive full-duplex), TRedisPipeline, TRedisSocketStream
 src/Redis.Pool.pas               TRedisPool (Acquire/Release, descarte, health check, poda), TRedisPoolParams
 src/Redis.Commands.pas           TRedisCommandExecutor (abstrato), TRedisCommandFamily, RedisArgs, conversores
 src/Redis.Commands.Keys.pas      DEL UNLINK EXISTS EXPIRE TTL TYPE RENAME COPY SCAN
@@ -187,8 +187,10 @@ src/Redis.Commands.Lists.pas     LPUSH RPOP LRANGE LMOVE + BLPOP/BRPOP/BLMOVE
 src/Redis.Commands.Sets.pas      SADD SMEMBERS SMISMEMBER SINTER/SUNION/SDIFF SSCAN
 src/Redis.Commands.ZSets.pas     ZADD ZRANGE ZRANGEBYSCORE ZINCRBY ZPOPMIN ZSCAN
 src/Redis.Commands.Scripting.pas EVAL/EVALSHA com cache de SHA, SCRIPT LOAD/EXISTS/FLUSH
+src/Redis.Commands.PubSub.pas    PUBLISH SPUBLISH PUBSUB CHANNELS/NUMSUB/NUMPAT (quem publica)
 src/Redis.Transaction.pas        TRedisTransaction: MULTI/EXEC/WATCH em um pipeline só
-src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico
+src/Redis.PubSub.pas             TRedisSubscriber: conexão dedicada + thread de leitura + callbacks
+src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico + CreateSubscriber
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao
@@ -197,7 +199,6 @@ Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e*
 ```
 src/Redis.Commands.Streams.pas    XADD XREADGROUP XACK XAUTOCLAIM
 src/Redis.Commands.Server.pas     PING INFO CONFIG DBSIZE FLUSHDB
-src/Redis.PubSub.pas              conexao dedicada + thread + callbacks
 ```
 
 Princípio: **kernel genérico primeiro**. `Execute('SET', ['k','v'])` alcança qualquer
@@ -234,18 +235,23 @@ nunca bloqueia o usuário da lib.
   **Rode o SmokeTest após qualquer mudança na lib.**
 - **SmokeTest com TLS (M5):** `SmokeTest.exe --tls` roda a bateria INTEIRA contra o
   listener cifrado (6380) em vez do de texto claro, e acrescenta a seção de TLS —
-  99 passos contra os 90 do modo plain. Precisa dos certs e do override de pé:
+  135 passos contra os 126 do modo plain. Desde o M7 ele vale ainda mais: pub/sub é o
+  único caso em que uma thread lê e outra escreve no mesmo envelope TLS ao mesmo tempo. Precisa dos certs e do override de pé:
   `docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`. Rode nos
   **dois backends**: build normal (SChannel) e `--build-mode=openssl` (OpenSSL).
   Qualquer argumento que não seja `--tls` é recusado com exit code 2 — um `--tsl`
   digitado errado rodaria em texto claro com cara de sucesso.
 - **TLS fica FORA da suíte de integração**, de propósito: ela precisa valer com só o
   `docker-compose.yml` de pé, sem certs. Quem exercita TLS é o SmokeTest.
-- **Suítes unitárias (M1–M6, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
+- **Suítes unitárias (M1–M7, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
   (FPCUnit). Não precisam de servidor — a `Redis.ConnectionTests` sobe a conexão inteira
   sobre um servidor falso em memória (`TRedisConnection.CreateOnStream`), e a
   `Redis.CommandsTests` amarra um `TRedisClient` a esse mesmo servidor falso para conferir
-  **os bytes que foram para o fio** e a conversão da resposta. Rodar as do FPC com
+  **os bytes que foram para o fio** e a conversão da resposta. A `Redis.PubSubTests` vai
+  além: o servidor falso dela **responde** (interpreta o `SUBSCRIBE` e devolve a
+  confirmação), porque sem diálogo não dá para testar confirmação, ordem de mensagens nem
+  queda de conexão. Ele também desiste da leitura depois de 10 s — trava de segurança para
+  que um teste mal escrito não pendure a suíte na thread de leitura. Rodar as do FPC com
   `lazbuild -B tests\Unit\fpc\RedisUnitTestsFpc.lpi` e depois
   `tests\Unit\fpc\RedisUnitTestsFpc.exe --all --format=plain` (sem parâmetros abre a GUI).
   As do Delphi só pelo IDE, via `Redis.groupproj`.
@@ -256,10 +262,12 @@ nunca bloqueia o usuário da lib.
   `Assert.AreEqual(string, string)` do DUnitX ignora caixa por padrão, o que enfraqueceria
   os testes em silêncio e só do lado Delphi). Ao mexer numa suíte, portar para a outra na
   mesma sessão; conferir com um `diff` das seções de implementation.
-- **Suíte de integração (M3–M6, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
+- **Suíte de integração (M3–M7, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
   `Redis.IntegrationSuite.dproj`) + `tests/Integration/fpc` (FPCUnit). **Precisa do
   container de pé.** O M4 acrescentou uma fixture por família, mais a do
-  `TRedisClient`. Mesma regra de paridade das unitárias — corpo idêntico, só as
+  `TRedisClient`; o M7, a de pub/sub — que inclui o teste de **reconexão** (derruba a
+  conexão do assinante com `CLIENT KILL ID` e confere que as assinaturas voltaram, pelo
+  `PUBSUB NUMSUB` do servidor, não pela contabilidade do cliente). Mesma regra de paridade das unitárias — corpo idêntico, só as
   fixtures mudam. Rodar as do FPC com
   `lazbuild -B tests\Integration\fpc\RedisIntegrationTestsFpc.lpi` e depois
   `tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain`.
@@ -462,7 +470,60 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
      `EVALSHA` responderia `NOSCRIPT` para sempre com o cache "funcionando".
    - **`NOSCRIPT` não é erro, é recado:** `Run` reenvia o `EVAL` sozinha e quem chamou não
      vê nada. Erro do próprio Lua sobe — reenviar só repetiria a falha.
-7. **M7 — Pub/Sub (RESP2) + RESP3 opt-in via `HELLO 3`.**
+7. ~~**M7 — Pub/Sub (RESP2) + RESP3 opt-in via `HELLO 3`.**~~ **Concluído em 2026-08-23.**
+   `Redis.PubSub` (`TRedisSubscriber`: conexão dedicada, thread de leitura, callbacks,
+   reconexão com replay das assinaturas) e `Redis.Commands.PubSub`
+   (`PUBLISH`/`SPUBLISH`/`PUBSUB`), mais `PubSub` e `CreateSubscriber` no `TRedisClient`.
+   O kernel ganhou o modo **full-duplex** (`TRedisConnection.Send`/`Receive`) — a primeira
+   mudança na `Redis.Connection` desde o M5.
+   **Validado nos DOIS compiladores** contra o container (2026-08-23): SmokeTest **PASS
+   nos 126 passos** e **135 com `--tls`** — no FPC nas quatro combinações de
+   SChannel/OpenSSL x fpc direto/lazbuild, e no Delphi 12 nas configurações Debug
+   (SChannel) e OpenSSL; unitárias **376/376** (339 + 37) e integração **55/55**
+   (45 + 10), com `Tests Leaked: 0` nas duas configurações do Delphi. O TLS importa mais
+   aqui do que nos milestones anteriores: pub/sub é o único caso em que uma thread lê e
+   outra escreve no MESMO envelope TLS ao mesmo tempo, e é o `--tls` que exercita isso —
+   passou nos dois backends.
+
+   A primeira rodada no **Delphi 12** derrubou um bug **anterior ao M7**: o
+   `RedisUtf8Decode` levantava `EEncodingError` em bytes que não são UTF-8 válido, porque
+   o `TEncoding.UTF8` do Delphi usa `MB_ERR_INVALID_CHARS` (ver os gotchas da codebase
+   dual). Só apareceu agora porque o pub/sub é o primeiro caminho que chama `AsString`
+   num payload binário — e o sintoma era cruel: a mensagem binária sumia calada, porque
+   a exceção do callback ia para o `OnError` e a thread de leitura seguia viva. O decode
+   passou a usar um `TMBCSEncoding` tolerante, com teste nas duas suítes
+   (`Decode_BytesInvalidos_NaoLevanta`, `AsString_EmBulkBinario_NaoLevanta`). Vale como
+   lembrete de para que serve a matriz: o FPC dava PASS nos 126 passos com o bug de pé.
+
+   Decisões tomadas aqui (racional nas seções 37–42 de `docs/DECISOES.md`):
+   - **O kernel ganhou `Send` (escreve e não lê) e `Receive` (lê sem ter escrito).**
+     `Receive` **não pega o lock**, senão um canal em silêncio — o estado normal de um
+     assinante — impediria qualquer `SUBSCRIBE` novo de sair. Nesse modo, sobra no buffer
+     NÃO é conexão suja (é a próxima mensagem) e a falha **não libera** reader e stream,
+     só derruba o socket: há duas threads na conexão, e a que falhou não sabe onde a
+     outra está. É a mesma regra do `Abort`.
+   - **A conexão do assinante não tem read timeout**, porque silêncio não é falha. Quem
+     desbloqueia a leitura no `Stop` é o `Abort`. Limitação conhecida: conexão que morre
+     em silêncio só aparece quando o TCP desiste — o Redis não tem heartbeat. Quem
+     precisa detectar antes chama `Ping` de um timer da aplicação.
+   - **O callback roda NA THREAD DE LEITURA, em ordem.** Ordem é o único compromisso que
+     o pub/sub do Redis cumpre; despachar pelo `RedisPool` daria vazão e a embaralharia.
+     O preço está no contrato: callback lento segura o socket. Exceção de callback vai
+     para o `OnError` e não derruba a conexão, e `Execute` de dentro do callback é
+     recusado na hora (quem leria a resposta é a thread que está no callback).
+   - **`Subscribe` espera a confirmação do servidor**, e espera o ESTADO (o canal na lista
+     confirmada), não uma contagem de mensagens. Sem isso, publicar logo depois de assinar
+     seria uma corrida. Não espera em dois casos: chamado de dentro do callback, e com a
+     conexão caída sob `AutoReconnect` (a assinatura fica registrada e vai no fio depois).
+   - **Duas listas por tipo de assinatura**: o que a aplicação pediu (a reconexão reenvia)
+     e o que o servidor confirmou (a queda zera). Uma só não daria conta.
+   - **Em RESP2 a lib recusa antes do servidor** o comando que ele recusaria em modo de
+     assinatura, nomeando a saída; em RESP3 não há restrição. Na thread de leitura, RESP3
+     separa os mundos pelo tipo push; RESP2, pela forma do array — verbo, aridade **e**
+     terceiro item inteiro nas confirmações (sem essa terceira checagem, um
+     `PUBSUB CHANNELS` com um canal chamado `subscribe` viraria confirmação fantasma).
+   - **Mensagem publicada com o assinante fora do ar está perdida**, e a lib não finge o
+     contrário com fila local. `PUBLISH` devolve quantos receberam NAQUELE instante.
 8. **M8 — Streams + consumer groups.** Fecha o v1.
 9. **M9 — 3 samples GUI duais VCL/LCL:** `CacheAsideVcl` (GET/SETEX/DEL, hit/miss),
    `LockDistribuidoVcl` (`SET NX PX` + token de posse, release por Lua — mostra o erro

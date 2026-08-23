@@ -30,6 +30,8 @@ uses
   Redis.Commands.ZSets in '..\..\src\Redis.Commands.ZSets.pas',
   Redis.Commands.Scripting in '..\..\src\Redis.Commands.Scripting.pas',
   Redis.Transaction in '..\..\src\Redis.Transaction.pas',
+  Redis.Commands.PubSub in '..\..\src\Redis.Commands.PubSub.pas',
+  Redis.PubSub in '..\..\src\Redis.PubSub.pas',
   Redis.Client in '..\..\src\Redis.Client.pas',
   Redis.DUnitXCompat in 'Redis.DUnitXCompat.pas',
   Redis.TypesTests in 'Redis.TypesTests.pas',
@@ -37,7 +39,8 @@ uses
   Redis.ConnectionTests in 'Redis.ConnectionTests.pas',
   Redis.PoolTests in 'Redis.PoolTests.pas',
   Redis.CommandsTests in 'Redis.CommandsTests.pas',
-  Redis.TransactionTests in 'Redis.TransactionTests.pas';
+  Redis.TransactionTests in 'Redis.TransactionTests.pas',
+  Redis.PubSubTests in 'Redis.PubSubTests.pas';
 
 var
   runner: ITestRunner;

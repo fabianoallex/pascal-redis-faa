@@ -3,12 +3,12 @@
 Cliente **Redis** (protocolo RESP2/RESP3) para **Free Pascal/Lazarus e Delphi**, numa
 única codebase, escrito do zero. Licença MIT.
 
-> **Status: em construção (M6 — transações e scripting).** Já dá para conectar,
-> autenticar, executar **qualquer** comando do Redis, usar pipeline, trabalhar com um pool
-> de conexões com timeout de verdade, chamar os comandos de Keys, Strings, Hashes, Lists,
-> Sets e ZSets pela fachada tipada — inclusive os bloqueantes — em RESP2 ou RESP3, cifrar
-> tudo isso com TLS, e usar `MULTI`/`EXEC`/`WATCH` e scripts Lua com cache de SHA. Ainda
-> faltam pub/sub (M7) e streams (M8). O roadmap completo está em `CLAUDE.md`.
+> **Status: em construção (M7 — pub/sub).** Já dá para conectar, autenticar, executar
+> **qualquer** comando do Redis, usar pipeline, trabalhar com um pool de conexões com
+> timeout de verdade, chamar os comandos de Keys, Strings, Hashes, Lists, Sets e ZSets
+> pela fachada tipada — inclusive os bloqueantes — em RESP2 ou RESP3, cifrar tudo isso
+> com TLS, usar `MULTI`/`EXEC`/`WATCH` e scripts Lua com cache de SHA, e publicar e
+> assinar canais. Ainda faltam streams (M8). O roadmap completo está em `CLAUDE.md`.
 
 Projeto irmão da [`pascal-amqp-faa`](../pascal-amqp-faa) (cliente AMQP 0-9-1) e da
 `pascal-pipes-faa` (IPC), com as mesmas regras: codebase dual FPC 3.2.2 + Delphi 12,
@@ -378,6 +378,84 @@ reenvia o `EVAL` sozinha: o cache é uma otimização que **se autocorrige**, nu
 suposição sobre o estado do servidor. `Eval`, `EvalSha`, `ScriptLoad`, `ScriptExists` e
 `ScriptFlush` continuam disponíveis para quem quiser controlar o ciclo à mão.
 
+### Pub/Sub
+
+Publicar é um comando comum — sai por qualquer conexão do pool:
+
+```pascal
+uses
+  Redis.Types, Redis.Client, Redis.Commands.PubSub;
+
+// Devolve quantos assinantes receberam NAQUELE instante. Zero quer dizer que a
+// mensagem evaporou: pub/sub não guarda nada para quem chegar depois.
+LClient.PubSub.Publish('noticias', 'saiu a edição de hoje');
+```
+
+Assinar é outra história: em RESP2 o `SUBSCRIBE` sequestra a conexão, então o assinante
+tem conexão **dedicada**, fora do pool, e uma thread lendo o que o servidor manda.
+
+```pascal
+uses
+  SysUtils, Redis.Types, Redis.Client, Redis.PubSub;
+
+type
+  TOuvinte = class
+    procedure Chegou(ASender: TObject; const AMensagem: TRedisPubSubMessage);
+  end;
+
+procedure TOuvinte.Chegou(ASender: TObject; const AMensagem: TRedisPubSubMessage);
+begin
+  // Roda na THREAD DE LEITURA, uma mensagem por vez, na ordem em que chegaram.
+  // Numa aplicação GUI, marshale para a main thread (TThread.Queue).
+  WriteLn(AMensagem.Channel, ': ', AMensagem.Text);
+end;
+
+var
+  LSub: TRedisSubscriber;
+begin
+  LSub := LClient.CreateSubscriber;      // mesmos parâmetros de conexão do cliente
+  try
+    LSub.OnMessage := LOuvinte.Chegou;
+    LSub.Start;                          // abre a conexão e sobe a thread
+
+    // Só volta depois que o servidor confirmou: publicar na linha seguinte não
+    // é corrida.
+    LSub.Subscribe(['noticias', 'alertas']);
+    LSub.PSubscribe(['noticias.*']);     // glob, casado pelo servidor
+
+    ...                                  // a aplicação segue a vida
+  finally
+    LSub.Free;                           // para a thread e fecha a conexão
+  end;
+end;
+```
+
+O que a lib garante e o que não garante:
+
+- **Ordem, sim.** O `OnMessage` roda na thread de leitura, uma mensagem por vez. É por
+  isso que **callback lento segura o socket**: trabalho pesado deve ir para uma fila da
+  aplicação. Exceção que escape do callback vai para o `OnError` e não derruba a conexão.
+- **Entrega, não.** Mensagem publicada enquanto o assinante estava fora do ar está
+  perdida — sem fila, sem replay. Quem precisa de entrega garantida usa Streams com
+  consumer group (M8).
+- **Reconexão, sim** (`AutoReconnect`, ligado por padrão): a conexão volta e as
+  assinaturas são reenviadas, com `OnDisconnected`/`OnReconnected` avisando. O que se
+  perdeu no intervalo continua perdido.
+
+Em **RESP2**, com assinatura ativa, a conexão só aceita comandos de assinatura, `PING`,
+`RESET` e `QUIT` — e a lib recusa os outros **antes** de irem ao fio, com uma mensagem que
+diz o que fazer. Em **RESP3** (`LParams.Protocol := rpRESP3`) as mensagens chegam por um
+tipo próprio (push) e a mesma conexão continua servindo comando comum:
+
+```pascal
+LSub.Subscribe(['noticias']);
+LSub.Execute('SET', ['ultima-leitura', '2026-08-23']);   // só vale em RESP3
+```
+
+`PUBSUB CHANNELS`, `NUMSUB` e `NUMPAT` respondem pelo lado de quem publica
+(`LClient.PubSub.ActiveChannels`, `CountSubscribers`, `NumPatterns`) — úteis para
+diagnóstico, não para lógica de aplicação: a resposta envelhece no caminho de volta.
+
 ## Build
 
 **FPC (linha de comando):**
@@ -406,6 +484,9 @@ importam: os bytes que foram para o fio (a ordem dos modificadores de `SET`, `ZA
 `WITHSCORES` mudando de forma entre RESP2 e RESP3). As transações e o scripting entram
 aqui também: o `EXEC` nulo, o comando recusado na fila e o `NOSCRIPT` são estados que o
 servidor real quase nunca produz sob demanda, mas que o servidor falso entrega de graça.
+O pub/sub tem um servidor falso que **responde** — ele interpreta o `SUBSCRIBE` e devolve
+a confirmação —, porque sem diálogo não há como testar confirmação de assinatura, ordem
+das mensagens, callback que levanta nem queda de conexão.
 
 **FPC/Lazarus (FPCUnit):**
 
@@ -423,7 +504,10 @@ verificar em memória: read timeout de socket de verdade, conexão derrubada pel
 (`CLIENT KILL`), conexão contaminada por resposta atrasada, várias threads dividindo o
 mesmo pool e uma bateria por família de comandos contra o servidor real — incluindo um
 `BLPOP` com prazo maior que o read timeout e a prova de que `HGETALL` e `ZRANGE
-WITHSCORES` devolvem o mesmo resultado em RESP2 e em RESP3.
+WITHSCORES` devolvem o mesmo resultado em RESP2 e em RESP3. O pub/sub entra com a
+difusão para vários assinantes e com a reconexão: a conexão do assinante é derrubada por
+`CLIENT KILL` e quem confirma que as assinaturas voltaram é o **servidor**, pelo
+`PUBSUB NUMSUB`, não a contabilidade do cliente.
 
 **TLS fica de fora daqui de propósito:** esta suíte tem de valer com só o
 `docker-compose.yml` de pé, sem certificado nenhum. Quem exercita TLS é o smoke
@@ -449,8 +533,8 @@ Precisa do container de pé (seção anterior).
 ```
 cd samples\SmokeTest
 lazbuild SmokeTest.lpi
-SmokeTest.exe          # 108 passos, texto claro (6379)
-SmokeTest.exe --tls    # 117 passos, tudo cifrado (6380) + a seção de TLS
+SmokeTest.exe          # 126 passos, texto claro (6379)
+SmokeTest.exe --tls    # 135 passos, tudo cifrado (6380) + a seção de TLS
 ```
 
 Sai com código 0 se todos os passos passarem, e 2 se receber um argumento

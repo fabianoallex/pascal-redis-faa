@@ -60,6 +60,8 @@ uses
   Redis.Commands.Sets,
   Redis.Commands.ZSets,
   Redis.Commands.Scripting,
+  Redis.Commands.PubSub,
+  Redis.PubSub,
   Redis.Transaction;
 
 const
@@ -93,6 +95,7 @@ type
     FSets: TRedisSetsCommands;
     FZSets: TRedisZSetsCommands;
     FScripting: TRedisScriptingCommands;
+    FPubSub: TRedisPubSubCommands;
     procedure CreateFamilies;
     /// Pool dedicado aos comandos bloqueantes, criado na primeira vez que um
     /// deles roda. Fica separado do pool comum de proposito.
@@ -153,6 +156,24 @@ type
     /// cliente, e liberar a transacao nao a fecha.
     function BeginTransaction: TRedisTransaction;
 
+    /// Cria um assinante de pub/sub com os MESMOS parametros de conexao deste
+    /// cliente (host, porta, senha, banco, TLS, protocolo).
+    ///
+    /// O assinante NAO usa o pool: pub/sub exige conexao dedicada, e a dele
+    /// nasce no Start e morre no Free. Quem chama e' dono do objeto — este
+    /// metodo e um atalho de configuracao, nao um registro:
+    ///
+    ///   LSub := LClient.CreateSubscriber;
+    ///   try
+    ///     LSub.OnMessage := Chegou;
+    ///     LSub.Start;
+    ///     LSub.Subscribe([''noticias'']);
+    ///     ...
+    ///   finally
+    ///     LSub.Free;
+    ///   end;
+    function CreateSubscriber: TRedisSubscriber;
+
     /// Empresta uma conexao. No modo conexao unica devolve sempre a mesma, e
     /// Release e' no-op — o que deixa o try/finally identico nos dois modos.
     function Acquire: TRedisConnection;
@@ -179,6 +200,10 @@ type
     property ZSets: TRedisZSetsCommands read FZSets;
     /// EVAL/EVALSHA com cache de SHA, e a familia SCRIPT.
     property Scripting: TRedisScriptingCommands read FScripting;
+    /// PUBLISH e a familia PUBSUB — o lado de quem publica. Assinar e' outra
+    /// historia: precisa de conexao dedicada, e quem cuida disso e' o
+    /// TRedisSubscriber (CreateSubscriber, logo abaixo).
+    property PubSub: TRedisPubSubCommands read FPubSub;
 
     /// Parametros de conexao em uso.
     property Params: TRedisParams read FParams;
@@ -245,6 +270,7 @@ begin
   FSets.Free;
   FZSets.Free;
   FScripting.Free;
+  FPubSub.Free;
   FBlockingPool.Free;
   if FOwnsPool then
     FPool.Free;
@@ -265,6 +291,12 @@ begin
   FSets := TRedisSetsCommands.Create(Self);
   FZSets := TRedisZSetsCommands.Create(Self);
   FScripting := TRedisScriptingCommands.Create(Self);
+  FPubSub := TRedisPubSubCommands.Create(Self);
+end;
+
+function TRedisClient.CreateSubscriber: TRedisSubscriber;
+begin
+  Result := TRedisSubscriber.Create(FParams);
 end;
 
 function TRedisClient.BeginTransaction: TRedisTransaction;
