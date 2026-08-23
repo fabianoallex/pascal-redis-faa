@@ -34,7 +34,8 @@ uses
   Redis.Types, Redis.Threading, Redis.Connection, Redis.Pool, Redis.Client,
   Redis.Commands, Redis.Commands.Keys, Redis.Commands.Strings,
   Redis.Commands.Hashes, Redis.Commands.Lists, Redis.Commands.Sets,
-  Redis.Commands.ZSets, Redis.Commands.Scripting, Redis.Commands.PubSub,
+  Redis.Commands.ZSets, Redis.Commands.Streams, Redis.Commands.Scripting,
+  Redis.Commands.PubSub,
   Redis.Transaction, Redis.PubSub;
 
 type
@@ -182,6 +183,24 @@ type
     procedure Run_SegundaChamadaUsaOCache;
     procedure Run_AposScriptFlush_SeRecuperaSozinho;
     procedure LockDistribuido_SoQuemTemOTokenLibera;
+  end;
+
+  TRedisStreamsIntegrationTests = class(TTestCase)
+  published
+    procedure Stream_AddLenRangeEDel;
+    procedure Campos_ComBinarioEAcentuacao;
+    procedure XRead_LeSoOQueVeioDepoisDoId;
+    procedure XReadBlocking_PrazoMaiorQueOReceiveTimeout_NaoEstouraOSocket;
+    procedure XRead_MesmoResultadoEmResp2EResp3;
+    procedure XTrimMaxLen_ExatoCortaOExcedente;
+    procedure Grupo_EntregaConfirmaEZeraAPendencia;
+    procedure Grupo_TryCreateEhIdempotente;
+    procedure Grupo_DoisConsumidores_NaoRecebemAMesmaEntrada;
+    procedure Grupo_ModoZero_ReleAPelDoProprioConsumidor;
+    procedure PendenciaDeQuemMorreu_VoltaPorXAutoClaim;
+    procedure XClaim_MinIdleAlto_NaoRoubaTrabalhoEmAndamento;
+    procedure EntradaApagada_ContinuaNaPelSemCampos;
+    procedure XInfoGroups_EnxergaOGrupoEAPendencia;
   end;
 
 implementation
@@ -2318,6 +2337,516 @@ begin
   end;
 end;
 
+{ TRedisStreamsIntegrationTests }
+
+// Cria (ou recria) um stream limpo com um grupo, e devolve os ids gravados.
+// Apagar a chave antes e' o que torna cada teste independente do anterior:
+// XADD nunca sobrescreve, so' acrescenta.
+function PreparaGrupo(AClient: TRedisClient; const ASufixo, AGrupo: string;
+  const AMensagens: array of string): TRedisStringArray;
+var
+  I: Integer;
+begin
+  LimpaChaves(AClient, [ASufixo]);
+  AClient.Streams.XGroupTryCreate(Chave(ASufixo), AGrupo, '0', True);
+  SetLength(Result, Length(AMensagens));
+  for I := 0 to High(AMensagens) do
+    Result[I] := AClient.Streams.XAdd(Chave(ASufixo), ['t', AMensagens[I]]);
+end;
+
+procedure TRedisStreamsIntegrationTests.Stream_AddLenRangeEDel;
+var
+  LClient: TRedisClient;
+  LId1, LId2: string;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['x:log']);
+
+    LId1 := LClient.Streams.XAdd(Chave('x:log'), ['nivel', 'info', 'msg', 'um']);
+    LId2 := LClient.Streams.XAdd(Chave('x:log'), ['nivel', 'erro', 'msg', 'dois']);
+    // Id gerado pelo servidor: sempre crescente, e e' isso que da' a ordem
+    // total do log.
+    TAssert.AssertTrue('o segundo id e maior', LId2 > LId1);
+    TAssert.AssertEquals(Int64(2), LClient.Streams.XLen(Chave('x:log')));
+
+    LEntradas := LClient.Streams.XRange(Chave('x:log'),
+      REDIS_STREAM_MIN_ID, REDIS_STREAM_MAX_ID);
+    TAssert.AssertEquals(2, Length(LEntradas));
+    TAssert.AssertEquals(LId1, LEntradas[0].Id);
+    TAssert.AssertEquals('info', LEntradas[0].FieldValue('nivel'));
+    TAssert.AssertEquals('dois', LEntradas[1].FieldValue('msg'));
+    TAssert.AssertEquals(2, LEntradas[1].FieldCount);
+
+    // XREVRANGE espera (fim, inicio) — a ordem inversa da do XRANGE.
+    LEntradas := LClient.Streams.XRevRange(Chave('x:log'),
+      REDIS_STREAM_MAX_ID, REDIS_STREAM_MIN_ID, 1);
+    TAssert.AssertEquals(1, Length(LEntradas));
+    TAssert.AssertEquals(LId2, LEntradas[0].Id);
+
+    // Extremo aberto: pagina sem repetir a ultima entrada lida.
+    LEntradas := LClient.Streams.XRange(Chave('x:log'),
+      RedisStreamIdExclusive(LId1), REDIS_STREAM_MAX_ID);
+    TAssert.AssertEquals(1, Length(LEntradas));
+    TAssert.AssertEquals(LId2, LEntradas[0].Id);
+
+    TAssert.AssertEquals(Int64(1), LClient.Streams.XDel(Chave('x:log'), [LId1]));
+    TAssert.AssertEquals(Int64(1), LClient.Streams.XLen(Chave('x:log')));
+
+    LimpaChaves(LClient, ['x:log']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.Campos_ComBinarioEAcentuacao;
+var
+  LClient: TRedisClient;
+  LBin: TBytes;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['x:bin']);
+    // CRLF no meio: se o codec medisse a bulk string pelo delimitador em vez
+    // do comprimento, o valor voltaria cortado aqui.
+    LBin := MakeBytes([0, 13, 10, 255, 65, 0]);
+
+    LClient.Streams.XAdd(Chave('x:bin'), ['blob', LBin, 'texto', 'coração']);
+    LEntradas := LClient.Streams.XRange(Chave('x:bin'), '-', '+');
+    TAssert.AssertEquals(1, Length(LEntradas));
+    TAssert.AssertEquals(Hex(LBin), Hex(LEntradas[0].FieldBytes('blob')));
+    TAssert.AssertEquals('coração', LEntradas[0].FieldValue('texto'));
+
+    LimpaChaves(LClient, ['x:bin']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.XRead_LeSoOQueVeioDepoisDoId;
+var
+  LClient: TRedisClient;
+  LId1: string;
+  LDados: TRedisStreamDataArray;
+  LIndice: Integer;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['x:read', 'x:outro']);
+    LId1 := LClient.Streams.XAdd(Chave('x:read'), ['t', 'um']);
+    LClient.Streams.XAdd(Chave('x:read'), ['t', 'dois']);
+
+    // Do comeco: as duas.
+    LDados := LClient.Streams.XRead([Chave('x:read')], ['0-0']);
+    TAssert.AssertEquals(1, Length(LDados));
+    TAssert.AssertEquals(2, Length(LDados[0].Entries));
+
+    // Depois do primeiro id: so' a segunda. O id e' EXCLUSIVO no XREAD.
+    LDados := LClient.Streams.XRead([Chave('x:read')], [LId1]);
+    TAssert.AssertEquals(1, Length(LDados[0].Entries));
+    TAssert.AssertEquals('dois', LDados[0].Entries[0].FieldValue('t'));
+
+    // Duas chaves, uma sem novidade: a que nao tem nada NAO aparece na
+    // resposta. Procurar pelo nome e' o certo; indexar pela posicao da
+    // chamada leria a chave errada.
+    LClient.Streams.XAdd(Chave('x:outro'), ['t', 'tres']);
+    LDados := LClient.Streams.XRead([Chave('x:read'), Chave('x:outro')],
+      [REDIS_STREAM_LAST, '0-0']);
+    LIndice := RedisFindStreamData(LDados, Chave('x:outro'));
+    TAssert.AssertTrue('a chave com novidade veio', LIndice >= 0);
+    TAssert.AssertEquals(-1, RedisFindStreamData(LDados, Chave('x:read')));
+    TAssert.AssertEquals('tres', LDados[LIndice].Entries[0].FieldValue('t'));
+
+    LimpaChaves(LClient, ['x:read', 'x:outro']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.XReadBlocking_PrazoMaiorQueOReceiveTimeout_NaoEstouraOSocket;
+var
+  LParams: TRedisParams;
+  LClient: TRedisClient;
+  LInicio, LGasto: UInt64;
+  LDados: TRedisStreamDataArray;
+begin
+  // Read timeout de 1 s e BLOCK de 2 s: se o bloqueante saisse pelo pool
+  // comum, o socket desistiria no meio e levantaria ERedisTimeout com a
+  // resposta ainda a caminho. Mesmo cenario do BLPOP no M4 — aqui vale
+  // repetir porque a unidade e' outra (milissegundos, nao segundos), e um erro
+  // de fator 1000 passaria despercebido num teste de fio.
+  LParams := ParamsDeTeste;
+  LParams.ReceiveTimeoutMs := 1000;
+  LClient := TRedisClient.Create(LParams);
+  try
+    LimpaChaves(LClient, ['x:vazio']);
+    LClient.Streams.XAdd(Chave('x:vazio'), ['t', 'marco']);
+
+    LInicio := RedisTickMs;
+    LDados := LClient.Streams.XReadBlocking([Chave('x:vazio')],
+      [REDIS_STREAM_LAST], 2000);
+    LGasto := RedisTickMs - LInicio;
+
+    // Prazo vencido sem novidade e' o caso NORMAL de um leitor ocioso.
+    TAssert.AssertEquals(0, Length(LDados));
+    TAssert.AssertTrue('esperou os 2 s do comando', LGasto >= 1800);
+    TAssert.AssertTrue('e nao esperou demais', LGasto < 6000);
+
+    // E o pool comum continua servindo: o bloqueante nao passou por ele.
+    LClient.Strings.SetValue(Chave('x:apos'), 'ok');
+    TAssert.AssertEquals('ok', LClient.Strings.GetString(Chave('x:apos')));
+
+    LimpaChaves(LClient, ['x:vazio', 'x:apos']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.XRead_MesmoResultadoEmResp2EResp3;
+var
+  LClient, LResp3: TRedisClient;
+  LDados: TRedisStreamDataArray;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['x:proto']);
+    LClient.Streams.XAdd(Chave('x:proto'), ['t', 'um']);
+
+    // Em RESP2 o XREAD responde uma lista de pares; em RESP3, um mapa. A
+    // fachada devolve a MESMA estrutura nos dois — sem isso a aplicacao teria
+    // de ramificar por protocolo.
+    LDados := LClient.Streams.XRead([Chave('x:proto')], ['0-0']);
+    TAssert.AssertEquals(1, Length(LDados));
+    TAssert.AssertEquals(Chave('x:proto'), LDados[0].Key);
+    TAssert.AssertEquals('um', LDados[0].Entries[0].FieldValue('t'));
+
+    LResp3 := NovoClienteResp3;
+    try
+      LDados := LResp3.Streams.XRead([Chave('x:proto')], ['0-0']);
+      TAssert.AssertEquals(1, Length(LDados));
+      TAssert.AssertEquals(Chave('x:proto'), LDados[0].Key);
+      TAssert.AssertEquals('um', LDados[0].Entries[0].FieldValue('t'));
+    finally
+      LResp3.Free;
+    end;
+
+    LimpaChaves(LClient, ['x:proto']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.XTrimMaxLen_ExatoCortaOExcedente;
+var
+  LClient: TRedisClient;
+  I: Integer;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['x:trim']);
+    for I := 1 to 10 do
+      LClient.Streams.XAdd(Chave('x:trim'), ['n', IntToStr(I)]);
+
+    // Exato ('=') e' o unico que da' para afirmar num teste: com '~' o
+    // servidor para no limite do no' interno e o tamanho fica "mil e pouco".
+    TAssert.AssertEquals(Int64(7),
+      LClient.Streams.XTrimMaxLen(Chave('x:trim'), 3, False));
+    TAssert.AssertEquals(Int64(3), LClient.Streams.XLen(Chave('x:trim')));
+    // O que sobra e' o FIM do log: stream corta pelo comeco.
+    TAssert.AssertEquals('8',
+      LClient.Streams.XRange(Chave('x:trim'), '-', '+')[0].FieldValue('n'));
+
+    LimpaChaves(LClient, ['x:trim']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.Grupo_EntregaConfirmaEZeraAPendencia;
+var
+  LClient: TRedisClient;
+  LIds: TRedisStringArray;
+  LDados: TRedisStreamDataArray;
+  LResumo: TRedisPendingSummary;
+begin
+  LClient := NovoCliente;
+  try
+    LIds := PreparaGrupo(LClient, 'x:g1', 'grupo', ['um', 'dois']);
+
+    LDados := LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g1')],
+      [REDIS_STREAM_NEW]);
+    TAssert.AssertEquals(1, Length(LDados));
+    TAssert.AssertEquals(2, Length(LDados[0].Entries));
+    TAssert.AssertEquals('um', LDados[0].Entries[0].FieldValue('t'));
+
+    // Entregue e nao confirmado: as duas estao na PEL. E' o que separa stream
+    // de pub/sub — o servidor LEMBRA quem recebeu o que.
+    LResumo := LClient.Streams.XPendingSummary(Chave('x:g1'), 'grupo');
+    TAssert.AssertEquals(Int64(2), LResumo.Count);
+    TAssert.AssertEquals(LIds[0], LResumo.MinId);
+    TAssert.AssertEquals(LIds[1], LResumo.MaxId);
+    TAssert.AssertEquals(1, Length(LResumo.Consumers));
+    TAssert.AssertEquals('w1', LResumo.Consumers[0].Name);
+    TAssert.AssertEquals(Int64(2), LResumo.Consumers[0].Count);
+
+    TAssert.AssertEquals(Int64(2),
+      LClient.Streams.XAck(Chave('x:g1'), 'grupo', [LIds[0], LIds[1]]));
+    LResumo := LClient.Streams.XPendingSummary(Chave('x:g1'), 'grupo');
+    TAssert.AssertEquals(Int64(0), LResumo.Count);
+    TAssert.AssertEquals('', LResumo.MinId);
+
+    // Confirmar de novo nao e' erro: o segundo XACK so' nao encontra nada.
+    TAssert.AssertEquals(Int64(0),
+      LClient.Streams.XAck(Chave('x:g1'), 'grupo', [LIds[0]]));
+
+    LimpaChaves(LClient, ['x:g1']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.Grupo_TryCreateEhIdempotente;
+var
+  LClient: TRedisClient;
+  LLevantou: Boolean;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['x:g2']);
+
+    // MKSTREAM: sem ele, criar grupo num stream que ainda nao recebeu nada
+    // falha — e e' exatamente o que acontece quando o consumidor sobe antes
+    // do produtor.
+    TAssert.AssertTrue('criou agora',
+      LClient.Streams.XGroupTryCreate(Chave('x:g2'), 'grupo', '0', True));
+    TAssert.AssertFalse('ja existia',
+      LClient.Streams.XGroupTryCreate(Chave('x:g2'), 'grupo', '0', True));
+
+    // A versao que nao perdoa continua levantando: quem quer saber, sabe.
+    LLevantou := False;
+    try
+      LClient.Streams.XGroupCreate(Chave('x:g2'), 'grupo', '0');
+    except
+      on E: ERedisReplyError do
+        LLevantou := E.Code = 'BUSYGROUP';
+    end;
+    TAssert.AssertTrue('XGroupCreate levanta BUSYGROUP', LLevantou);
+
+    TAssert.AssertTrue('destruiu',
+      LClient.Streams.XGroupDestroy(Chave('x:g2'), 'grupo'));
+    TAssert.AssertFalse('ja nao existe',
+      LClient.Streams.XGroupDestroy(Chave('x:g2'), 'grupo'));
+
+    LimpaChaves(LClient, ['x:g2']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.Grupo_DoisConsumidores_NaoRecebemAMesmaEntrada;
+var
+  LClient: TRedisClient;
+  LPrimeiro, LSegundo: TRedisStreamDataArray;
+begin
+  LClient := NovoCliente;
+  try
+    PreparaGrupo(LClient, 'x:g3', 'grupo', ['um', 'dois', 'tres']);
+
+    // O grupo REPARTE o trabalho: cada entrada vai para um consumidor so'.
+    // E' a diferenca para o pub/sub, em que todo assinante recebe tudo.
+    LPrimeiro := LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g3')],
+      [REDIS_STREAM_NEW], 2);
+    LSegundo := LClient.Streams.XReadGroup('grupo', 'w2', [Chave('x:g3')],
+      [REDIS_STREAM_NEW], 2);
+
+    TAssert.AssertEquals(2, Length(LPrimeiro[0].Entries));
+    TAssert.AssertEquals(1, Length(LSegundo[0].Entries));
+    TAssert.AssertEquals('tres', LSegundo[0].Entries[0].FieldValue('t'));
+    // Nada sobrou: o terceiro pedido volta vazio.
+    TAssert.AssertEquals(0, Length(LClient.Streams.XReadGroup('grupo', 'w1',
+      [Chave('x:g3')], [REDIS_STREAM_NEW])));
+
+    LimpaChaves(LClient, ['x:g3']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.Grupo_ModoZero_ReleAPelDoProprioConsumidor;
+var
+  LClient: TRedisClient;
+  LIds: TRedisStringArray;
+  LDados: TRedisStreamDataArray;
+begin
+  LClient := NovoCliente;
+  try
+    LIds := PreparaGrupo(LClient, 'x:g4', 'grupo', ['um', 'dois']);
+    LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g4')],
+      [REDIS_STREAM_NEW]);
+    LClient.Streams.XAck(Chave('x:g4'), 'grupo', [LIds[0]]);
+
+    // '0' rele' a PEL DESTE consumidor: e' como um worker retoma o proprio
+    // trabalho depois de reiniciar. So' o que nao foi confirmado volta.
+    LDados := LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g4')],
+      [REDIS_STREAM_PENDING]);
+    TAssert.AssertEquals(1, Length(LDados));
+    TAssert.AssertEquals(1, Length(LDados[0].Entries));
+    TAssert.AssertEquals(LIds[1], LDados[0].Entries[0].Id);
+
+    // E a PEL de OUTRO consumidor esta' vazia: a pendencia tem dono.
+    LDados := LClient.Streams.XReadGroup('grupo', 'w2', [Chave('x:g4')],
+      [REDIS_STREAM_PENDING]);
+    TAssert.AssertEquals(0, Length(LDados[0].Entries));
+
+    LimpaChaves(LClient, ['x:g4']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.PendenciaDeQuemMorreu_VoltaPorXAutoClaim;
+var
+  LClient: TRedisClient;
+  LIds: TRedisStringArray;
+  LEntradas: TRedisStreamEntryArray;
+  LProximo: string;
+  LPendencias: TRedisPendingEntryArray;
+begin
+  LClient := NovoCliente;
+  try
+    LIds := PreparaGrupo(LClient, 'x:g5', 'grupo', ['um', 'dois']);
+    // w1 recebe e "morre" sem confirmar.
+    LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g5')],
+      [REDIS_STREAM_NEW]);
+
+    // w2 recolhe o trabalho abandonado. Minimo de ociosidade 0 porque o teste
+    // nao tem tempo a perder; em producao e' na casa dos minutos.
+    LEntradas := LClient.Streams.XAutoClaim(Chave('x:g5'), 'grupo', 'w2', 0,
+      '0-0', 10, LProximo);
+    TAssert.AssertEquals(2, Length(LEntradas));
+    TAssert.AssertEquals(LIds[0], LEntradas[0].Id);
+    TAssert.AssertEquals('um', LEntradas[0].FieldValue('t'));
+    // Cursor com a mecanica do SCAN: '0-0' significa que a varredura acabou.
+    TAssert.AssertEquals('0-0', LProximo);
+
+    // A pendencia trocou de dono — nao sumiu. Continua sendo obrigacao de
+    // alguem ate' o XACK.
+    LPendencias := LClient.Streams.XPendingRange(Chave('x:g5'), 'grupo',
+      '-', '+', 10);
+    TAssert.AssertEquals(2, Length(LPendencias));
+    TAssert.AssertEquals('w2', LPendencias[0].Consumer);
+    TAssert.AssertTrue('ja foi entregue mais de uma vez',
+      LPendencias[0].DeliveryCount >= 2);
+
+    // Filtrar por consumidor: w1 ja' nao tem nada.
+    TAssert.AssertEquals(0, Length(LClient.Streams.XPendingRange(
+      Chave('x:g5'), 'grupo', '-', '+', 10, 'w1')));
+
+    LimpaChaves(LClient, ['x:g5']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.XClaim_MinIdleAlto_NaoRoubaTrabalhoEmAndamento;
+var
+  LClient: TRedisClient;
+  LIds: TRedisStringArray;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  LClient := NovoCliente;
+  try
+    LIds := PreparaGrupo(LClient, 'x:g6', 'grupo', ['um']);
+    LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g6')],
+      [REDIS_STREAM_NEW]);
+
+    // A entrada acabou de ser entregue: um XCLAIM de 10 minutos NAO a leva.
+    // E' a protecao contra dois workers processando a mesma coisa.
+    LEntradas := LClient.Streams.XClaim(Chave('x:g6'), 'grupo', 'w2', 600000,
+      [LIds[0]]);
+    TAssert.AssertEquals(0, Length(LEntradas));
+
+    // Com minimo zero, leva.
+    LEntradas := LClient.Streams.XClaim(Chave('x:g6'), 'grupo', 'w2', 0,
+      [LIds[0]]);
+    TAssert.AssertEquals(1, Length(LEntradas));
+    TAssert.AssertEquals(LIds[0], LEntradas[0].Id);
+
+    // JUSTID nao traz os campos — e nao conta como nova entrega.
+    TAssert.AssertEquals(1, Length(LClient.Streams.XClaimJustId(
+      Chave('x:g6'), 'grupo', 'w1', 0, [LIds[0]])));
+
+    LimpaChaves(LClient, ['x:g6']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.EntradaApagada_ContinuaNaPelSemCampos;
+var
+  LClient: TRedisClient;
+  LIds: TRedisStringArray;
+  LDados: TRedisStreamDataArray;
+begin
+  LClient := NovoCliente;
+  try
+    LIds := PreparaGrupo(LClient, 'x:g7', 'grupo', ['um']);
+    LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g7')],
+      [REDIS_STREAM_NEW]);
+
+    // XDEL tira do STREAM, nao da PEL: a pendencia continua, e o que volta e'
+    // um id sem campos. E' o caso que faria um leitor ingenuo levantar.
+    LClient.Streams.XDel(Chave('x:g7'), [LIds[0]]);
+    LDados := LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g7')],
+      [REDIS_STREAM_PENDING]);
+    TAssert.AssertEquals(1, Length(LDados[0].Entries));
+    TAssert.AssertEquals(LIds[0], LDados[0].Entries[0].Id);
+    TAssert.AssertTrue('sem campos', LDados[0].Entries[0].IsDeleted);
+    TAssert.AssertEquals(0, LDados[0].Entries[0].FieldCount);
+
+    // Quem tira da PEL e' o XACK, e ele funciona mesmo com a entrada apagada.
+    TAssert.AssertEquals(Int64(1),
+      LClient.Streams.XAck(Chave('x:g7'), 'grupo', [LIds[0]]));
+
+    LimpaChaves(LClient, ['x:g7']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsIntegrationTests.XInfoGroups_EnxergaOGrupoEAPendencia;
+var
+  LClient: TRedisClient;
+  LInfo: IRedisReply;
+begin
+  LClient := NovoCliente;
+  try
+    PreparaGrupo(LClient, 'x:g8', 'grupo', ['um']);
+    LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:g8')],
+      [REDIS_STREAM_NEW]);
+
+    LInfo := LClient.Streams.XInfoStream(Chave('x:g8'));
+    TAssert.AssertEquals(Int64(1), LInfo.ValueByKey('length').AsInteger);
+
+    // XINFO GROUPS devolve uma entrada por grupo, cada uma um mapa achatado —
+    // a mesma forma em RESP2 e RESP3.
+    LInfo := LClient.Streams.XInfoGroups(Chave('x:g8'));
+    TAssert.AssertEquals(1, LInfo.Count);
+    TAssert.AssertEquals('grupo', LInfo[0].ValueByKey('name').AsString);
+    TAssert.AssertEquals(Int64(1), LInfo[0].ValueByKey('pending').AsInteger);
+
+    LInfo := LClient.Streams.XInfoConsumers(Chave('x:g8'), 'grupo');
+    TAssert.AssertEquals(1, LInfo.Count);
+    TAssert.AssertEquals('w1', LInfo[0].ValueByKey('name').AsString);
+
+    LimpaChaves(LClient, ['x:g8']);
+  finally
+    LClient.Free;
+  end;
+end;
+
 initialization
   RegisterTest(TRedisConnectionIntegrationTests);
   RegisterTest(TRedisPoolIntegrationTests);
@@ -2331,5 +2860,6 @@ initialization
   RegisterTest(TRedisTransactionIntegrationTests);
   RegisterTest(TRedisPubSubIntegrationTests);
   RegisterTest(TRedisScriptingIntegrationTests);
+  RegisterTest(TRedisStreamsIntegrationTests);
 
 end.

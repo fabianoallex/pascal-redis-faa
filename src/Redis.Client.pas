@@ -35,7 +35,8 @@
         LClient.Release(LConn);
       end;
 
-  Os bloqueantes (BLPOP, BRPOP, BLMOVE) ja' cuidam disso sozinhos: passam por
+  Os bloqueantes (BLPOP, BRPOP, BLMOVE, XREAD/XREADGROUP com BLOCK) ja' cuidam
+  disso sozinhos: passam por
   ExecuteBlocking, que os manda por um pool SEPARADO, com o read timeout
   esticado para alem do timeout do comando. Se saissem do pool comum, um worker
   esperando 30 s por uma tarefa seguraria uma conexao que as outras threads
@@ -59,6 +60,7 @@ uses
   Redis.Commands.Lists,
   Redis.Commands.Sets,
   Redis.Commands.ZSets,
+  Redis.Commands.Streams,
   Redis.Commands.Scripting,
   Redis.Commands.PubSub,
   Redis.PubSub,
@@ -94,6 +96,7 @@ type
     FLists: TRedisListsCommands;
     FSets: TRedisSetsCommands;
     FZSets: TRedisZSetsCommands;
+    FStreams: TRedisStreamsCommands;
     FScripting: TRedisScriptingCommands;
     FPubSub: TRedisPubSubCommands;
     procedure CreateFamilies;
@@ -198,6 +201,9 @@ type
     property Sets: TRedisSetsCommands read FSets;
     /// Comandos de sorted set: ZADD, ZRANGE, ZINCRBY.
     property ZSets: TRedisZSetsCommands read FZSets;
+    /// Comandos de stream e consumer group: XADD, XRANGE, XREADGROUP, XACK.
+    /// E' a unica familia com entrega confiavel — ver Redis.Commands.Streams.
+    property Streams: TRedisStreamsCommands read FStreams;
     /// EVAL/EVALSHA com cache de SHA, e a familia SCRIPT.
     property Scripting: TRedisScriptingCommands read FScripting;
     /// PUBLISH e a familia PUBSUB — o lado de quem publica. Assinar e' outra
@@ -269,6 +275,7 @@ begin
   FLists.Free;
   FSets.Free;
   FZSets.Free;
+  FStreams.Free;
   FScripting.Free;
   FPubSub.Free;
   FBlockingPool.Free;
@@ -290,6 +297,7 @@ begin
   FLists := TRedisListsCommands.Create(Self);
   FSets := TRedisSetsCommands.Create(Self);
   FZSets := TRedisZSetsCommands.Create(Self);
+  FStreams := TRedisStreamsCommands.Create(Self);
   FScripting := TRedisScriptingCommands.Create(Self);
   FPubSub := TRedisPubSubCommands.Create(Self);
 end;

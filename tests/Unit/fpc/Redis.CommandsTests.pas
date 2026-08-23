@@ -30,6 +30,7 @@ uses
   Redis.Types, Redis.Resp, Redis.Connection, Redis.Client, Redis.Commands,
   Redis.Commands.Keys, Redis.Commands.Strings, Redis.Commands.Hashes,
   Redis.Commands.Lists, Redis.Commands.Sets, Redis.Commands.ZSets,
+  Redis.Commands.Streams,
   Redis.ConnectionTests;
 
 type
@@ -168,6 +169,74 @@ type
     procedure ZPopMin_DevolveMembroEScore;
     procedure ZIncrBy_MandaDeltaComPonto;
     procedure ZScan_MontaMatchECount;
+  end;
+
+  TRedisStreamHelpersTests = class(TTestCase)
+  published
+    procedure StreamId_MontaMsEHifenESequencia;
+    procedure TryParseStreamId_QuebraNasDuasPartes;
+    procedure TryParseStreamId_SemHifen_DevolveFalse;
+    procedure TryParseStreamId_AceitaOParenteseDeExtremoAberto;
+    procedure StreamIdExclusive_AcrescentaOParentese;
+    procedure StreamIdExclusive_NaoDuplicaOParentese;
+    procedure ReplyToStreamEntries_NuloViraListaVazia;
+    procedure ReplyToStreamEntries_ForaDoFormato_Levanta;
+    procedure ReplyToStreamData_Resp2_ListaDePares;
+    procedure ReplyToStreamData_Resp3_MapaAchatado;
+    procedure FindStreamData_AchaPeloNomeENaoPelaPosicao;
+  end;
+
+  TRedisStreamsCommandsTests = class(TTestCase)
+  published
+    procedure XAdd_UsaAsteriscoEDevolveOId;
+    procedure XAdd_SemCampo_Levanta;
+    procedure XAdd_QuantidadeImpar_Levanta;
+    procedure XAddId_MandaOIdEscolhido;
+    procedure XAddMaxLen_Aproximado_MandaOTilAntesDoNumero;
+    procedure XAddMaxLen_Exato_MandaOIgual;
+    procedure XAddMinId_MandaMinIdAntesDoAsterisco;
+    procedure XTrimMaxLen_AproximadoPorPadrao;
+    procedure XTrimMinId_Exato;
+    procedure XLen_DevolveOTamanho;
+    procedure XDel_ContaOsQueExistiam;
+    procedure XDel_SemId_NaoVaiAoServidor;
+    procedure XRange_SemCount_NaoMandaCount;
+    procedure XRange_ComCount_MandaOModificador;
+    procedure XRange_LeIdECamposPorNome;
+    procedure XRange_CampoAusente_TryFieldValueDevolveFalse;
+    procedure XRange_EntradaApagada_VemSemCampos;
+    procedure XRevRange_InverteOsExtremos;
+    procedure XRead_MontaOBlocoStreams;
+    procedure XRead_ComCount_CountAntesDeStreams;
+    procedure XRead_ChavesEIdsDesbalanceados_Levanta;
+    procedure XRead_SemChave_Levanta;
+    procedure XRead_NadaNovo_NuloViraListaVazia;
+    procedure XRead_Resp2_UmaEntradaPorChave;
+    procedure XRead_Resp3_MapaAchatado_MesmoResultado;
+    procedure XReadBlocking_MandaBlockEmMilissegundos;
+    procedure XReadBlocking_RestauraOTimeoutDaConexao;
+    procedure XGroupCreate_ComMkStream;
+    procedure XGroupTryCreate_BusyGroup_DevolveFalseSemLevantar;
+    procedure XGroupTryCreate_OutroErro_Levanta;
+    procedure XGroupDestroy_ZeroEhFalse;
+    procedure XGroupDelConsumer_DevolveAsPendenciasPerdidas;
+    procedure XReadGroup_MontaGroupCountENoack;
+    procedure XReadGroup_ModoNovo_MandaOMaiorQue;
+    procedure XReadGroupBlocking_BlockEntreCountENoack;
+    procedure XAck_ContaOsConfirmados;
+    procedure XAck_SemId_NaoVaiAoServidor;
+    procedure XPendingSummary_LeTotalFaixaEConsumidores;
+    procedure XPendingSummary_SemPendencia_VemZeradoESemIds;
+    procedure XPendingRange_MandaFaixaEContagem;
+    procedure XPendingRange_ComConsumidor_VaiNoFim;
+    procedure XPendingRange_LeOciosidadeEEntregas;
+    procedure XPendingIdle_MandaIdleAntesDaFaixa;
+    procedure XClaim_MandaMinIdleEOsIds;
+    procedure XClaim_SemId_Levanta;
+    procedure XClaimJustId_MandaJustIdNoFim;
+    procedure XAutoClaim_LeCursorEntradasEApagados;
+    procedure XAutoClaim_RespostaDeDoisItens_AindaFunciona;
+    procedure XInfoStream_MapaAchatado_AcessoPorChave;
   end;
 
 implementation
@@ -1942,6 +2011,1091 @@ begin
   end;
 end;
 
+{ Helpers das fixtures de stream }
+
+// Um inteiro RESP2 no fio.
+function Inteiro(AValue: Int64): string;
+begin
+  Result := ':' + IntToStr(AValue) + CRLF;
+end;
+
+// Agregado ja' montado a partir de pedacos prontos (array de arrays).
+function Agregado(const AItens: array of string): string;
+var
+  I: Integer;
+begin
+  Result := '*' + IntToStr(Length(AItens)) + CRLF;
+  for I := 0 to High(AItens) do
+    Result := Result + AItens[I];
+end;
+
+// Uma entrada de stream no fio: [id, [campo, valor, ...]].
+function Entrada(const AId: string; const ACampos: array of string): string;
+begin
+  Result := '*2' + CRLF + Bulk(AId) + Arr(ACampos);
+end;
+
+// Entrada que sobrou so' na PEL: o id existe, os campos vem NULOS porque a
+// entrada ja' saiu do stream.
+function EntradaApagada(const AId: string): string;
+begin
+  Result := '*2' + CRLF + Bulk(AId) + '*-1' + CRLF;
+end;
+
+// A resposta de um XREAD em RESP2: lista de pares [chave, entradas].
+function StreamResp2(const AChave, AEntradas: string): string;
+begin
+  Result := Agregado([('*2' + CRLF) + Bulk(AChave) + AEntradas]);
+end;
+
+// A mesma resposta em RESP3: mapa chave -> entradas.
+function StreamResp3(const AChave, AEntradas: string): string;
+begin
+  Result := '%1' + CRLF + Bulk(AChave) + AEntradas;
+end;
+
+{ TRedisStreamHelpersTests }
+
+procedure TRedisStreamHelpersTests.StreamId_MontaMsEHifenESequencia;
+begin
+  TAssert.AssertEquals('1700000000000-0', RedisStreamId(1700000000000, 0));
+  TAssert.AssertEquals('5-3', RedisStreamId(5, 3));
+end;
+
+procedure TRedisStreamHelpersTests.TryParseStreamId_QuebraNasDuasPartes;
+var
+  LMs, LSeq: Int64;
+begin
+  TAssert.AssertTrue('id valido',
+    RedisTryParseStreamId('1700000000000-7', LMs, LSeq));
+  TAssert.AssertEquals(Int64(1700000000000), LMs);
+  TAssert.AssertEquals(Int64(7), LSeq);
+end;
+
+procedure TRedisStreamHelpersTests.TryParseStreamId_SemHifen_DevolveFalse;
+var
+  LMs, LSeq: Int64;
+begin
+  // '1700000000000' sozinho e' extremo VALIDO num XRANGE, mas nao e' um id
+  // completo — quem precisa das duas partes tem de saber a diferenca.
+  TAssert.AssertFalse('so o milissegundo',
+    RedisTryParseStreamId('1700000000000', LMs, LSeq));
+  TAssert.AssertFalse('texto qualquer',
+    RedisTryParseStreamId('nao-numero', LMs, LSeq));
+end;
+
+procedure TRedisStreamHelpersTests.TryParseStreamId_AceitaOParenteseDeExtremoAberto;
+var
+  LMs, LSeq: Int64;
+begin
+  TAssert.AssertTrue('extremo aberto',
+    RedisTryParseStreamId('(5-1', LMs, LSeq));
+  TAssert.AssertEquals(Int64(5), LMs);
+  TAssert.AssertEquals(Int64(1), LSeq);
+end;
+
+procedure TRedisStreamHelpersTests.StreamIdExclusive_AcrescentaOParentese;
+begin
+  TAssert.AssertEquals('(5-1', RedisStreamIdExclusive('5-1'));
+end;
+
+procedure TRedisStreamHelpersTests.StreamIdExclusive_NaoDuplicaOParentese;
+begin
+  // Paginar chamando duas vezes seguidas nao pode virar '((5-1', que o
+  // servidor recusaria.
+  TAssert.AssertEquals('(5-1', RedisStreamIdExclusive('(5-1'));
+end;
+
+procedure TRedisStreamHelpersTests.ReplyToStreamEntries_NuloViraListaVazia;
+begin
+  // Chave inexistente responde nulo; para quem le', "nao ha' entrada" e
+  // "lista vazia" sao a mesma coisa.
+  TAssert.AssertEquals(0, Length(RedisReplyToStreamEntries(RedisNull)));
+end;
+
+procedure TRedisStreamHelpersTests.ReplyToStreamEntries_ForaDoFormato_Levanta;
+var
+  LLevantou: Boolean;
+begin
+  LLevantou := False;
+  try
+    // Entrada precisa ser [id, campos]; um escalar solto nao e' entrada.
+    RedisReplyToStreamEntries(RedisArrayOf([RedisBulk('5-1')]));
+  except
+    on E: ERedisTypeError do
+      LLevantou := True;
+  end;
+  TAssert.AssertTrue('entrada malformada', LLevantou);
+end;
+
+procedure TRedisStreamHelpersTests.ReplyToStreamData_Resp2_ListaDePares;
+var
+  LDados: TRedisStreamDataArray;
+begin
+  LDados := RedisReplyToStreamData(RedisArrayOf([
+    RedisArrayOf([RedisBulk('s:a'),
+      RedisArrayOf([RedisArrayOf([RedisBulk('5-1'),
+        RedisArrayOf([RedisBulk('c'), RedisBulk('1')])])])])]));
+  TAssert.AssertEquals(1, Length(LDados));
+  TAssert.AssertEquals('s:a', LDados[0].Key);
+  TAssert.AssertEquals(1, Length(LDados[0].Entries));
+  TAssert.AssertEquals('5-1', LDados[0].Entries[0].Id);
+  TAssert.AssertEquals('1', LDados[0].Entries[0].FieldValue('c'));
+end;
+
+procedure TRedisStreamHelpersTests.ReplyToStreamData_Resp3_MapaAchatado;
+var
+  LDados: TRedisStreamDataArray;
+begin
+  // Em RESP3 o mesmo XREAD responde um MAPA, que o leitor guarda achatado:
+  // chave, entradas, chave, entradas. O resultado tem de ser identico ao do
+  // teste anterior — e' o que dispensa a aplicacao de ramificar por protocolo.
+  LDados := RedisReplyToStreamData(RedisArrayOf([
+    RedisBulk('s:a'),
+    RedisArrayOf([RedisArrayOf([RedisBulk('5-1'),
+      RedisArrayOf([RedisBulk('c'), RedisBulk('1')])])])]));
+  TAssert.AssertEquals(1, Length(LDados));
+  TAssert.AssertEquals('s:a', LDados[0].Key);
+  TAssert.AssertEquals(1, Length(LDados[0].Entries));
+  TAssert.AssertEquals('5-1', LDados[0].Entries[0].Id);
+  TAssert.AssertEquals('1', LDados[0].Entries[0].FieldValue('c'));
+end;
+
+procedure TRedisStreamHelpersTests.FindStreamData_AchaPeloNomeENaoPelaPosicao;
+var
+  LDados: TRedisStreamDataArray;
+begin
+  // Chave sem novidade nao aparece na resposta: pedir ['a','b'] e receber so'
+  // 'b' e' o caso NORMAL, e indexar por posicao leria a chave errada.
+  SetLength(LDados, 1);
+  LDados[0].Key := 'b';
+  TAssert.AssertEquals(0, RedisFindStreamData(LDados, 'b'));
+  TAssert.AssertEquals(-1, RedisFindStreamData(LDados, 'a'));
+end;
+
+{ TRedisStreamsCommandsTests }
+
+procedure TRedisStreamsCommandsTests.XAdd_UsaAsteriscoEDevolveOId;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LId: string;
+begin
+  LClient := NovoCliente(LFake, [Bulk('1700000000000-0')]);
+  try
+    LId := LClient.Streams.XAdd('s:log', ['nivel', 'info', 'msg', 'subiu']);
+    TAssert.AssertEquals(
+      Wire(['XADD', 's:log', '*', 'nivel', 'info', 'msg', 'subiu']),
+      LFake.WrittenText);
+    TAssert.AssertEquals('1700000000000-0', LId);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAdd_SemCampo_Levanta;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LLevantou: Boolean;
+begin
+  LLevantou := False;
+  LClient := NovoCliente(LFake, []);
+  try
+    try
+      // O Redis nao guarda entrada sem campo; recusar aqui poupa uma ida ao
+      // servidor para receber um erro de sintaxe.
+      LClient.Streams.XAdd('s:log', []);
+    except
+      on E: ERedisException do
+        LLevantou := True;
+    end;
+    TAssert.AssertTrue('XADD sem campo', LLevantou);
+    TAssert.AssertEquals('', LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAdd_QuantidadeImpar_Levanta;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LLevantou: Boolean;
+begin
+  LLevantou := False;
+  LClient := NovoCliente(LFake, []);
+  try
+    try
+      LClient.Streams.XAdd('s:log', ['campo']);
+    except
+      on E: ERedisException do
+        LLevantou := True;
+    end;
+    TAssert.AssertTrue('campo sem valor', LLevantou);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAddId_MandaOIdEscolhido;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Bulk('5-1')]);
+  try
+    LClient.Streams.XAddId('s:log', '5-1', ['a', '1']);
+    TAssert.AssertEquals(Wire(['XADD', 's:log', '5-1', 'a', '1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAddMaxLen_Aproximado_MandaOTilAntesDoNumero;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Bulk('5-1')]);
+  try
+    LClient.Streams.XAddMaxLen('s:log', 1000, True, ['a', '1']);
+    // A ordem nao e' livre: MAXLEN, o operador, o numero e SO' ENTAO o id.
+    TAssert.AssertEquals(
+      Wire(['XADD', 's:log', 'MAXLEN', '~', '1000', '*', 'a', '1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAddMaxLen_Exato_MandaOIgual;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Bulk('5-1')]);
+  try
+    LClient.Streams.XAddMaxLen('s:log', 10, False, ['a', '1']);
+    TAssert.AssertEquals(
+      Wire(['XADD', 's:log', 'MAXLEN', '=', '10', '*', 'a', '1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAddMinId_MandaMinIdAntesDoAsterisco;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Bulk('9-0')]);
+  try
+    LClient.Streams.XAddMinId('s:log', '5-0', True, ['a', '1']);
+    TAssert.AssertEquals(
+      Wire(['XADD', 's:log', 'MINID', '~', '5-0', '*', 'a', '1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XTrimMaxLen_AproximadoPorPadrao;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Inteiro(3)]);
+  try
+    // O padrao e' o '~' de proposito: trim exato num stream grande custa caro
+    // num comando so'.
+    TAssert.AssertEquals(3, LClient.Streams.XTrimMaxLen('s:log', 100));
+    TAssert.AssertEquals(Wire(['XTRIM', 's:log', 'MAXLEN', '~', '100']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XTrimMinId_Exato;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Inteiro(2)]);
+  try
+    LClient.Streams.XTrimMinId('s:log', '9-0', False);
+    TAssert.AssertEquals(Wire(['XTRIM', 's:log', 'MINID', '=', '9-0']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XLen_DevolveOTamanho;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Inteiro(42)]);
+  try
+    TAssert.AssertEquals(42, LClient.Streams.XLen('s:log'));
+    TAssert.AssertEquals(Wire(['XLEN', 's:log']), LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XDel_ContaOsQueExistiam;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Inteiro(2)]);
+  try
+    TAssert.AssertEquals(2, LClient.Streams.XDel('s:log', ['5-1', '5-2', '9-9']));
+    TAssert.AssertEquals(Wire(['XDEL', 's:log', '5-1', '5-2', '9-9']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XDel_SemId_NaoVaiAoServidor;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, []);
+  try
+    TAssert.AssertEquals(0, LClient.Streams.XDel('s:log', []));
+    TAssert.AssertEquals('', LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRange_SemCount_NaoMandaCount;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*0' + CRLF]);
+  try
+    LClient.Streams.XRange('s:log', REDIS_STREAM_MIN_ID, REDIS_STREAM_MAX_ID);
+    TAssert.AssertEquals(Wire(['XRANGE', 's:log', '-', '+']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRange_ComCount_MandaOModificador;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*0' + CRLF]);
+  try
+    LClient.Streams.XRange('s:log', '(5-1', '+', 10);
+    TAssert.AssertEquals(Wire(['XRANGE', 's:log', '(5-1', '+', 'COUNT', '10']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRange_LeIdECamposPorNome;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  LClient := NovoCliente(LFake, [Agregado([
+    Entrada('5-1', ['nivel', 'info', 'msg', 'subiu']),
+    Entrada('5-2', ['nivel', 'erro', 'msg', 'caiu'])])]);
+  try
+    LEntradas := LClient.Streams.XRange('s:log', '-', '+');
+    TAssert.AssertEquals(2, Length(LEntradas));
+    TAssert.AssertEquals('5-1', LEntradas[0].Id);
+    TAssert.AssertEquals(2, LEntradas[0].FieldCount);
+    TAssert.AssertEquals('info', LEntradas[0].FieldValue('nivel'));
+    TAssert.AssertEquals('caiu', LEntradas[1].FieldValue('msg'));
+    TAssert.AssertFalse('entrada viva', LEntradas[0].IsDeleted);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRange_CampoAusente_TryFieldValueDevolveFalse;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LEntradas: TRedisStreamEntryArray;
+  LValor: string;
+begin
+  LClient := NovoCliente(LFake, [Agregado([Entrada('5-1', ['a', ''])])]);
+  try
+    LEntradas := LClient.Streams.XRange('s:log', '-', '+');
+    // Campo que existe e vale '' NAO e' o mesmo que campo ausente — a mesma
+    // distincao que o GET faz entre nulo e vazio.
+    TAssert.AssertTrue('campo presente e vazio',
+      LEntradas[0].TryFieldValue('a', LValor));
+    TAssert.AssertEquals('', LValor);
+    TAssert.AssertFalse('campo ausente',
+      LEntradas[0].TryFieldValue('b', LValor));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRange_EntradaApagada_VemSemCampos;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  LClient := NovoCliente(LFake, [Agregado([EntradaApagada('5-1')])]);
+  try
+    LEntradas := LClient.Streams.XRange('s:log', '-', '+');
+    // Entrada apagada do stream que ficou na PEL: o id existe, os campos nao.
+    // Levantar aqui quebraria a varredura da PEL, que e' onde isso acontece.
+    TAssert.AssertEquals(1, Length(LEntradas));
+    TAssert.AssertEquals('5-1', LEntradas[0].Id);
+    TAssert.AssertTrue('sem campos', LEntradas[0].IsDeleted);
+    TAssert.AssertEquals(0, LEntradas[0].FieldCount);
+    TAssert.AssertEquals('', LEntradas[0].FieldValue('a'));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRevRange_InverteOsExtremos;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*0' + CRLF]);
+  try
+    // No XREVRANGE o comando espera (fim, inicio) — trocar isso devolve lista
+    // vazia em silencio, que e' o pior tipo de bug.
+    LClient.Streams.XRevRange('s:log', '+', '-', 1);
+    TAssert.AssertEquals(Wire(['XREVRANGE', 's:log', '+', '-', 'COUNT', '1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRead_MontaOBlocoStreams;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*-1' + CRLF]);
+  try
+    LClient.Streams.XRead(['s:a', 's:b'], ['0-0', '5-1']);
+    // As chaves vao TODAS antes de TODOS os ids; intercalar e' o engano comum.
+    TAssert.AssertEquals(
+      Wire(['XREAD', 'STREAMS', 's:a', 's:b', '0-0', '5-1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRead_ComCount_CountAntesDeStreams;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*-1' + CRLF]);
+  try
+    LClient.Streams.XRead(['s:a'], ['0-0'], 5);
+    // STREAMS tem de ser o ULTIMO modificador: tudo o que vier depois dele e'
+    // lido como chave ou id.
+    TAssert.AssertEquals(
+      Wire(['XREAD', 'COUNT', '5', 'STREAMS', 's:a', '0-0']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRead_ChavesEIdsDesbalanceados_Levanta;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LLevantou: Boolean;
+begin
+  LLevantou := False;
+  LClient := NovoCliente(LFake, []);
+  try
+    try
+      LClient.Streams.XRead(['s:a', 's:b'], ['0-0']);
+    except
+      on E: ERedisException do
+        LLevantou := True;
+    end;
+    // O servidor responderia "Unbalanced XREAD list of streams", que nao diz
+    // onde esta' o engano. Aqui a mensagem cita as duas contagens.
+    TAssert.AssertTrue('duas chaves, um id', LLevantou);
+    TAssert.AssertEquals('', LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRead_SemChave_Levanta;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LLevantou: Boolean;
+begin
+  LLevantou := False;
+  LClient := NovoCliente(LFake, []);
+  try
+    try
+      LClient.Streams.XRead([], []);
+    except
+      on E: ERedisException do
+        LLevantou := True;
+    end;
+    TAssert.AssertTrue('XREAD sem chave', LLevantou);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRead_NadaNovo_NuloViraListaVazia;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*-1' + CRLF]);
+  try
+    // Sem novidade o servidor responde nulo. Para quem le', isso e' "nada
+    // chegou", nao erro.
+    TAssert.AssertEquals(0,
+      Length(LClient.Streams.XRead(['s:a'], ['$'])));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRead_Resp2_UmaEntradaPorChave;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LDados: TRedisStreamDataArray;
+begin
+  LClient := NovoCliente(LFake,
+    [StreamResp2('s:a', Agregado([Entrada('5-1', ['c', '1'])]))]);
+  try
+    LDados := LClient.Streams.XRead(['s:a'], ['0-0']);
+    TAssert.AssertEquals(1, Length(LDados));
+    TAssert.AssertEquals('s:a', LDados[0].Key);
+    TAssert.AssertEquals('5-1', LDados[0].Entries[0].Id);
+    TAssert.AssertEquals('1', LDados[0].Entries[0].FieldValue('c'));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XRead_Resp3_MapaAchatado_MesmoResultado;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LDados: TRedisStreamDataArray;
+begin
+  // O mesmo XREAD respondido como MAPA do RESP3. O resultado tem de ser
+  // identico ao do teste anterior: e' o que dispensa a aplicacao de ramificar
+  // por protocolo.
+  LClient := NovoCliente(LFake,
+    [StreamResp3('s:a', Agregado([Entrada('5-1', ['c', '1'])]))]);
+  try
+    LDados := LClient.Streams.XRead(['s:a'], ['0-0']);
+    TAssert.AssertEquals(1, Length(LDados));
+    TAssert.AssertEquals('s:a', LDados[0].Key);
+    TAssert.AssertEquals('5-1', LDados[0].Entries[0].Id);
+    TAssert.AssertEquals('1', LDados[0].Entries[0].FieldValue('c'));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XReadBlocking_MandaBlockEmMilissegundos;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*-1' + CRLF]);
+  try
+    LClient.Streams.XReadBlocking(['s:a'], ['$'], 2000, 10);
+    // BLOCK e' em MILISSEGUNDOS — ao contrario do timeout do BLPOP, que e' em
+    // segundos. Passar 2 aqui esperaria 2 ms.
+    TAssert.AssertEquals(
+      Wire(['XREAD', 'COUNT', '10', 'BLOCK', '2000', 'STREAMS', 's:a', '$']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XReadBlocking_RestauraOTimeoutDaConexao;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LAntes: Integer;
+begin
+  LClient := NovoCliente(LFake, ['*-1' + CRLF]);
+  try
+    LAntes := LClient.Connection.Params.ReceiveTimeoutMs;
+    LClient.Streams.XReadBlocking(['s:a'], ['$'], 30000);
+    // O prazo esticado vale so' durante o comando: deixa-lo esticado faria o
+    // proximo comando esperar 32 s por um servidor que ja' morreu.
+    TAssert.AssertEquals(LAntes, LClient.Connection.Params.ReceiveTimeoutMs);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XGroupCreate_ComMkStream;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['+OK' + CRLF]);
+  try
+    LClient.Streams.XGroupCreate('s:log', 'g1', '0', True);
+    TAssert.AssertEquals(
+      Wire(['XGROUP', 'CREATE', 's:log', 'g1', '0', 'MKSTREAM']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XGroupTryCreate_BusyGroup_DevolveFalseSemLevantar;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake,
+    ['-BUSYGROUP Consumer Group name already exists' + CRLF]);
+  try
+    // Grupo que ja' existe e' o estado desejado, nao falha: sem isto, todo
+    // worker que sobe depois do primeiro precisaria de try/except.
+    TAssert.AssertFalse('ja existia',
+      LClient.Streams.XGroupTryCreate('s:log', 'g1', '$'));
+    TAssert.AssertEquals(Wire(['XGROUP', 'CREATE', 's:log', 'g1', '$']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XGroupTryCreate_OutroErro_Levanta;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LLevantou: Boolean;
+begin
+  LLevantou := False;
+  LClient := NovoCliente(LFake,
+    ['-WRONGTYPE Operation against a key holding the wrong kind of value' + CRLF]);
+  try
+    try
+      // So' BUSYGROUP e' recado; o resto continua sendo falha, senao um
+      // WRONGTYPE viraria "o grupo ja' existe".
+      LClient.Streams.XGroupTryCreate('s:log', 'g1', '$');
+    except
+      on E: ERedisReplyError do
+        LLevantou := True;
+    end;
+    TAssert.AssertTrue('WRONGTYPE nao e recado', LLevantou);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XGroupDestroy_ZeroEhFalse;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Inteiro(0)]);
+  try
+    TAssert.AssertFalse('grupo nao existia',
+      LClient.Streams.XGroupDestroy('s:log', 'g1'));
+    TAssert.AssertEquals(Wire(['XGROUP', 'DESTROY', 's:log', 'g1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XGroupDelConsumer_DevolveAsPendenciasPerdidas;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Inteiro(3)]);
+  try
+    // O retorno nao e' decorativo: sao tres entradas que saem da PEL sem
+    // terem sido processadas.
+    TAssert.AssertEquals(3,
+      LClient.Streams.XGroupDelConsumer('s:log', 'g1', 'w1'));
+    TAssert.AssertEquals(
+      Wire(['XGROUP', 'DELCONSUMER', 's:log', 'g1', 'w1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XReadGroup_MontaGroupCountENoack;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*-1' + CRLF]);
+  try
+    LClient.Streams.XReadGroup('g1', 'w1', ['s:log'], ['>'], 10, True);
+    TAssert.AssertEquals(
+      Wire(['XREADGROUP', 'GROUP', 'g1', 'w1', 'COUNT', '10', 'NOACK',
+        'STREAMS', 's:log', '>']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XReadGroup_ModoNovo_MandaOMaiorQue;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LDados: TRedisStreamDataArray;
+begin
+  LClient := NovoCliente(LFake,
+    [StreamResp2('s:log', Agregado([Entrada('5-1', ['t', 'a'])]))]);
+  try
+    LDados := LClient.Streams.XReadGroup('g1', 'w1', ['s:log'],
+      [REDIS_STREAM_NEW]);
+    TAssert.AssertEquals(
+      Wire(['XREADGROUP', 'GROUP', 'g1', 'w1', 'STREAMS', 's:log', '>']),
+      LFake.WrittenText);
+    TAssert.AssertEquals(1, Length(LDados[0].Entries));
+    TAssert.AssertEquals('a', LDados[0].Entries[0].FieldValue('t'));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XReadGroupBlocking_BlockEntreCountENoack;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*-1' + CRLF]);
+  try
+    LClient.Streams.XReadGroupBlocking('g1', 'w1', ['s:log'], ['>'], 5000,
+      1, True);
+    TAssert.AssertEquals(
+      Wire(['XREADGROUP', 'GROUP', 'g1', 'w1', 'COUNT', '1', 'BLOCK', '5000',
+        'NOACK', 'STREAMS', 's:log', '>']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAck_ContaOsConfirmados;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, [Inteiro(2)]);
+  try
+    TAssert.AssertEquals(2,
+      LClient.Streams.XAck('s:log', 'g1', ['5-1', '5-2']));
+    TAssert.AssertEquals(Wire(['XACK', 's:log', 'g1', '5-1', '5-2']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAck_SemId_NaoVaiAoServidor;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, []);
+  try
+    TAssert.AssertEquals(0, LClient.Streams.XAck('s:log', 'g1', []));
+    TAssert.AssertEquals('', LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XPendingSummary_LeTotalFaixaEConsumidores;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LResumo: TRedisPendingSummary;
+begin
+  LClient := NovoCliente(LFake, [Agregado([
+    Inteiro(3), Bulk('5-1'), Bulk('9-2'),
+    Agregado([
+      '*2' + CRLF + Bulk('w1') + Bulk('2'),
+      '*2' + CRLF + Bulk('w2') + Bulk('1')])])]);
+  try
+    LResumo := LClient.Streams.XPendingSummary('s:log', 'g1');
+    TAssert.AssertEquals(Wire(['XPENDING', 's:log', 'g1']), LFake.WrittenText);
+    TAssert.AssertEquals(3, LResumo.Count);
+    TAssert.AssertEquals('5-1', LResumo.MinId);
+    TAssert.AssertEquals('9-2', LResumo.MaxId);
+    TAssert.AssertEquals(2, Length(LResumo.Consumers));
+    TAssert.AssertEquals('w1', LResumo.Consumers[0].Name);
+    // A contagem por consumidor vem como bulk string, e nao como inteiro.
+    TAssert.AssertEquals(2, LResumo.Consumers[0].Count);
+    TAssert.AssertEquals(1, LResumo.Consumers[1].Count);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XPendingSummary_SemPendencia_VemZeradoESemIds;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LResumo: TRedisPendingSummary;
+begin
+  // Grupo em dia: o servidor responde zero e NULO nos tres campos restantes.
+  LClient := NovoCliente(LFake, [Agregado([
+    Inteiro(0), '$-1' + CRLF, '$-1' + CRLF, '*-1' + CRLF])]);
+  try
+    LResumo := LClient.Streams.XPendingSummary('s:log', 'g1');
+    TAssert.AssertEquals(0, LResumo.Count);
+    TAssert.AssertEquals('', LResumo.MinId);
+    TAssert.AssertEquals('', LResumo.MaxId);
+    TAssert.AssertEquals(0, Length(LResumo.Consumers));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XPendingRange_MandaFaixaEContagem;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*0' + CRLF]);
+  try
+    LClient.Streams.XPendingRange('s:log', 'g1', '-', '+', 100);
+    TAssert.AssertEquals(Wire(['XPENDING', 's:log', 'g1', '-', '+', '100']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XPendingRange_ComConsumidor_VaiNoFim;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*0' + CRLF]);
+  try
+    LClient.Streams.XPendingRange('s:log', 'g1', '-', '+', 10, 'w1');
+    TAssert.AssertEquals(
+      Wire(['XPENDING', 's:log', 'g1', '-', '+', '10', 'w1']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XPendingRange_LeOciosidadeEEntregas;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LPendencias: TRedisPendingEntryArray;
+begin
+  LClient := NovoCliente(LFake, [Agregado([
+    '*4' + CRLF + Bulk('5-1') + Bulk('w1') + Inteiro(60000) + Inteiro(4)])]);
+  try
+    LPendencias := LClient.Streams.XPendingRange('s:log', 'g1', '-', '+', 10);
+    TAssert.AssertEquals(1, Length(LPendencias));
+    TAssert.AssertEquals('5-1', LPendencias[0].Id);
+    TAssert.AssertEquals('w1', LPendencias[0].Consumer);
+    TAssert.AssertEquals(60000, LPendencias[0].IdleMs);
+    // Contador alto denuncia mensagem venenosa: derruba todo worker que a pega.
+    TAssert.AssertEquals(4, LPendencias[0].DeliveryCount);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XPendingIdle_MandaIdleAntesDaFaixa;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente(LFake, ['*0' + CRLF]);
+  try
+    LClient.Streams.XPendingIdle('s:log', 'g1', 60000, '-', '+', 10);
+    // IDLE vem antes da faixa; depois dela e' erro de sintaxe no servidor.
+    TAssert.AssertEquals(
+      Wire(['XPENDING', 's:log', 'g1', 'IDLE', '60000', '-', '+', '10']),
+      LFake.WrittenText);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XClaim_MandaMinIdleEOsIds;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  LClient := NovoCliente(LFake, [Agregado([Entrada('5-1', ['t', 'a'])])]);
+  try
+    LEntradas := LClient.Streams.XClaim('s:log', 'g1', 'w2', 60000,
+      ['5-1', '5-2']);
+    TAssert.AssertEquals(
+      Wire(['XCLAIM', 's:log', 'g1', 'w2', '60000', '5-1', '5-2']),
+      LFake.WrittenText);
+    // Id que nao passou do minimo de ociosidade simplesmente nao volta.
+    TAssert.AssertEquals(1, Length(LEntradas));
+    TAssert.AssertEquals('5-1', LEntradas[0].Id);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XClaim_SemId_Levanta;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LLevantou: Boolean;
+begin
+  LLevantou := False;
+  LClient := NovoCliente(LFake, []);
+  try
+    try
+      LClient.Streams.XClaim('s:log', 'g1', 'w2', 60000, []);
+    except
+      on E: ERedisException do
+        LLevantou := True;
+    end;
+    TAssert.AssertTrue('XCLAIM sem id', LLevantou);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XClaimJustId_MandaJustIdNoFim;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LIds: TRedisStringArray;
+begin
+  LClient := NovoCliente(LFake, [Arr(['5-1'])]);
+  try
+    LIds := LClient.Streams.XClaimJustId('s:log', 'g1', 'w2', 60000, ['5-1']);
+    TAssert.AssertEquals(
+      Wire(['XCLAIM', 's:log', 'g1', 'w2', '60000', '5-1', 'JUSTID']),
+      LFake.WrittenText);
+    TAssert.AssertEquals(1, Length(LIds));
+    TAssert.AssertEquals('5-1', LIds[0]);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAutoClaim_LeCursorEntradasEApagados;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LEntradas: TRedisStreamEntryArray;
+  LProximo: string;
+  LApagados: TRedisStringArray;
+begin
+  LClient := NovoCliente(LFake, [Agregado([
+    Bulk('9-0'),
+    Agregado([Entrada('5-1', ['t', 'a'])]),
+    Arr(['4-9'])])]);
+  try
+    LEntradas := LClient.Streams.XAutoClaim('s:log', 'g1', 'w2', 60000, '0-0',
+      10, LProximo, LApagados);
+    TAssert.AssertEquals(
+      Wire(['XAUTOCLAIM', 's:log', 'g1', 'w2', '60000', '0-0', 'COUNT', '10']),
+      LFake.WrittenText);
+    // O cursor tem a mecanica do SCAN: repetir ate' voltar '0-0'.
+    TAssert.AssertEquals('9-0', LProximo);
+    TAssert.AssertEquals(1, Length(LEntradas));
+    TAssert.AssertEquals('5-1', LEntradas[0].Id);
+    TAssert.AssertEquals(1, Length(LApagados));
+    TAssert.AssertEquals('4-9', LApagados[0]);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XAutoClaim_RespostaDeDoisItens_AindaFunciona;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LEntradas: TRedisStreamEntryArray;
+  LProximo: string;
+begin
+  // Redis 6.2 respondia so' [cursor, entradas]: a lista de apagados chegou no
+  // 7. Aceitar os dois tamanhos e' o que mantem a lib util contra 6.2 sem
+  // ramificar por versao.
+  LClient := NovoCliente(LFake, [Agregado([
+    Bulk('0-0'),
+    Agregado([Entrada('5-1', ['t', 'a'])])])]);
+  try
+    LEntradas := LClient.Streams.XAutoClaim('s:log', 'g1', 'w2', 60000, '0-0',
+      -1, LProximo);
+    // Sem COUNT o modificador nao vai ao fio.
+    TAssert.AssertEquals(
+      Wire(['XAUTOCLAIM', 's:log', 'g1', 'w2', '60000', '0-0']),
+      LFake.WrittenText);
+    TAssert.AssertEquals('0-0', LProximo);
+    TAssert.AssertEquals(1, Length(LEntradas));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisStreamsCommandsTests.XInfoStream_MapaAchatado_AcessoPorChave;
+var
+  LFake: TRedisFakeServerStream;
+  LClient: TRedisClient;
+  LInfo: IRedisReply;
+begin
+  LClient := NovoCliente(LFake, [Agregado([
+    Bulk('length'), Inteiro(7),
+    Bulk('last-generated-id'), Bulk('9-0')])]);
+  try
+    LInfo := LClient.Streams.XInfoStream('s:log');
+    TAssert.AssertEquals(Wire(['XINFO', 'STREAM', 's:log']),
+      LFake.WrittenText);
+    TAssert.AssertEquals(Int64(7), LInfo.ValueByKey('length').AsInteger);
+    TAssert.AssertEquals('9-0',
+      LInfo.ValueByKey('last-generated-id').AsString);
+  finally
+    LClient.Free;
+  end;
+end;
+
 initialization
   RegisterTest(TRedisCommandHelpersTests);
   RegisterTest(TRedisClientTests);
@@ -1951,5 +3105,7 @@ initialization
   RegisterTest(TRedisListsCommandsTests);
   RegisterTest(TRedisSetsCommandsTests);
   RegisterTest(TRedisZSetsCommandsTests);
+  RegisterTest(TRedisStreamHelpersTests);
+  RegisterTest(TRedisStreamsCommandsTests);
 
 end.

@@ -70,6 +70,10 @@
         <UnitName Value="Redis.Commands.ZSets"/>
       </Item>
       <Item>
+        <Filename Value="..\src\Redis.Commands.Streams.pas"/>
+        <UnitName Value="Redis.Commands.Streams"/>
+      </Item>
+      <Item>
         <Filename Value="..\src\Redis.Commands.Scripting.pas"/>
         <UnitName Value="Redis.Commands.Scripting"/>
       </Item>

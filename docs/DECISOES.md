@@ -869,6 +869,130 @@ própria sairia conectando em outro lugar.
 
 ---
 
+## 43. Entrada sem campos é `nil`, e não dicionário vazio (M8)
+
+`XDEL` (e o trim) tira a entrada do **stream**, mas não da **PEL** do grupo. Quem
+relê a PEL — `XREADGROUP` com `'0'`, `XCLAIM`, `XAUTOCLAIM` — alcança ids que já
+não existem, e o servidor responde a entrada com o id preenchido e os campos
+**nulos**.
+
+Três saídas eram possíveis, e a escolha muda o que o chamador precisa escrever:
+
+- **Levantar.** Errado: isso não é anomalia, é o estado normal de uma pendência
+  sobre entrada apagada. Levantar quebraria justamente a varredura de PEL, que é
+  a rotina de recuperação de quem perdeu um worker — o pior momento para uma
+  exceção nova.
+- **Dicionário vazio.** Apaga a diferença entre "apagada do stream" e "gravada
+  sem campo" — e a segunda o Redis nem permite, porque `XADD` sem campo é erro de
+  sintaxe. Seria inventar um estado que o servidor não produz.
+- **`Fields = nil`, com `IsDeleted` para lê-lo por extenso.** É a escolhida. Um
+  teste só, e o mesmo `FieldValue` continua devolvendo `''` sem estourar.
+
+É a mesma regra que o M1 fixou para `rkNull`: nulo e vazio são coisas
+diferentes, e rebaixar um no outro esconde informação em silêncio.
+
+---
+
+## 44. `XREAD` absorve a diferença entre RESP2 e RESP3 — e a chave vem junto (M8)
+
+Em RESP2, `XREAD`/`XREADGROUP` respondem uma lista de pares `[chave, entradas]`.
+Em RESP3, respondem um **mapa** chave → entradas, que o leitor guarda achatado
+(decisão 13). São duas formas para o mesmo dado, e é o mesmo problema do
+`WITHSCORES` no M4 — resolvido do mesmo jeito, e pelo mesmo motivo:
+`RedisReplyToStreamData` olha o primeiro item (agregado = par do RESP2; escalar =
+nome de chave do mapa achatado) e devolve sempre `TRedisStreamDataArray`. A
+aplicação não ramifica por protocolo.
+
+O que **não** dava para esconder é mais importante: **chave sem novidade não
+aparece na resposta**. Pedir três streams e receber um é o caso normal, não a
+exceção — então a estrutura devolvida carrega o `Key` de cada bloco, e existe
+`RedisFindStreamData` para procurar pelo nome. Devolver "uma posição por chave
+pedida", com buracos, seria mais conveniente de indexar e mentiria sobre o que o
+servidor disse; indexar pela posição da chamada lê a chave errada na primeira vez
+que uma delas fica quieta.
+
+---
+
+## 45. `BLOCK` fica em milissegundos na API, porque é a unidade do comando (M8)
+
+O `BLPOP` do M4 recebe o prazo em **segundos** (é o que o comando espera, com
+fração desde o Redis 6). O `XREAD BLOCK` recebe em **milissegundos**. É uma
+inconsistência do Redis, não da lib.
+
+A tentação era uniformizar — expor tudo em segundos e multiplicar por mil por
+baixo. Não foi feito, e a regra é: **a assinatura pública usa a unidade do
+comando que ela representa**. Quem lê `XReadBlocking(..., 5000)` com a
+documentação do Redis ao lado vê o mesmo número nos dois lugares. Uniformizar
+faria `XReadBlocking(..., 5)` significar cinco segundos aqui e cinco
+milissegundos no `redis-cli` — e um erro de fator 1000 não estoura, só espera o
+tempo errado, que é o tipo de bug que ninguém encontra lendo o código.
+
+A conversão para segundos existe num lugar só, na chamada a `ExecuteBlocking`
+(que fala segundos porque nasceu para o `BLPOP`), com o comentário explicando por
+quê. O teste de integração exercita o prazo de verdade contra um read timeout
+menor, exatamente como o do `BLPOP`, porque um erro de unidade passaria
+despercebido num teste que só olha os bytes do comando.
+
+---
+
+## 46. `BUSYGROUP` é recado, não falha — mas só ele (M8)
+
+Todo worker de um consumer group precisa garantir que o grupo existe antes de
+ler. O jeito honesto é `XGROUP CREATE ... MKSTREAM` na subida — e o segundo
+worker recebe `BUSYGROUP`, que é o servidor dizendo "já está do jeito que você
+queria".
+
+`XGroupCreate` levanta, como qualquer erro de servidor (decisão 17). Ao lado
+dela, `XGroupTryCreate` trata **`BUSYGROUP` e só ele** como resposta, devolvendo
+False. É a mesma forma do `NOSCRIPT` no M6: um erro que a lib entende como estado
+esperado, e cuja tradução em código do chamador seria sempre a mesma linha.
+
+O "e só ele" é a parte que importa. Engolir qualquer erro transformaria um
+`WRONGTYPE` (a chave existe e é uma string) em "o grupo já existe", e o worker
+seguiria em frente para falhar adiante, longe da causa. Há teste unitário nos
+dois sentidos.
+
+---
+
+## 47. `XAUTOCLAIM` aceita resposta de dois e de três itens (M8)
+
+O `XAUTOCLAIM` do Redis 6.2 responde `[cursor, entradas]`. O 7.0 acrescentou um
+terceiro elemento: os ids que estavam na PEL e já não existem no stream (o
+servidor os remove sozinho; a lista é só o registro).
+
+O leitor aceita os dois tamanhos, e a sobrecarga que entrega os apagados
+simplesmente devolve lista vazia contra um servidor 6.2. A alternativa — exigir
+três itens — quebraria a lib num servidor perfeitamente capaz de rodar tudo o
+mais, e o sintoma seria um erro de tipo no meio da rotina de recuperação.
+
+Não há detecção de versão em nenhum ponto da lib, e não é para haver: **a forma
+da resposta é a informação**, e ela chega junto com o dado. Perguntar
+`INFO server` para decidir como ler a próxima resposta seria uma ida a mais e um
+estado a mais para envelhecer.
+
+---
+
+## 48. Os testes de stream voltam ao servidor falso roteirizado (M8)
+
+O M7 introduziu o servidor falso que **responde** — interpreta o que o cliente
+escreveu e mantém estado —, porque sem diálogo não havia como testar confirmação
+de assinatura nem ordem de mensagens. Era natural supor que `XREADGROUP`/`XACK`
+pediriam o mesmo.
+
+Não pedem. O que há de errar numa fachada de streams é (a) a montagem do comando
+— `MAXLEN ~` antes do id, `STREAMS` como último modificador, `IDLE` antes da
+faixa, `BLOCK` em milissegundos — e (b) a leitura de respostas de forma incomum:
+mapa do RESP3, entrada sem campos, `XAUTOCLAIM` sem a terceira parte. As duas
+coisas o roteiro fixo verifica melhor, porque **o teste escolhe a resposta**,
+inclusive as que um servidor real quase nunca produz sob demanda.
+
+O que exige um servidor de verdade — a PEL trocando de dono, o grupo repartindo o
+trabalho entre dois consumidores, o `XCLAIM` que não rouba trabalho recente —
+está na suíte de integração, onde a semântica é do Redis e não de um fake que eu
+escrevi para concordar comigo.
+
+---
+
 ## Compatibilidade e nomenclatura
 
 A lib fala RESP, não depende da implementação: funciona com **Redis**, **Valkey**, **KeyDB**

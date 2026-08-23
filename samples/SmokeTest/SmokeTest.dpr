@@ -6,14 +6,15 @@
     FPC:    fpc -Fu..\..\src -Fi..\..\src SmokeTest.dpr
     Delphi: dcc32 -NSSystem;Winapi -U..\..\src -I..\..\src SmokeTest.dpr
 
-  ESTADO (M7): conexao, pool, timeouts, fachadas por familia, TLS,
-  MULTI/EXEC/WATCH, scripting Lua e pub/sub. Este programa exercita tudo de
-  ponta a ponta — handshake, Execute generico, pipeline, erro de servidor,
-  binario, RESP2 x RESP3, read timeout, pool, invalidacao de conexao, os
-  comandos de chaves, strings, hashes, listas, conjuntos e sorted sets
-  (inclusive um bloqueante), transacoes com check-and-set, EVAL/EVALSHA com
-  cache de SHA e assinatura de canais com thread de leitura.
-  O que ainda nao existe: streams (M8).
+  ESTADO (M8): conexao, pool, timeouts, fachadas por familia, TLS,
+  MULTI/EXEC/WATCH, scripting Lua, pub/sub e streams com consumer groups. Este
+  programa exercita tudo de ponta a ponta — handshake, Execute generico,
+  pipeline, erro de servidor, binario, RESP2 x RESP3, read timeout, pool,
+  invalidacao de conexao, os comandos de chaves, strings, hashes, listas,
+  conjuntos, sorted sets e streams (inclusive dois bloqueantes), transacoes com
+  check-and-set, EVAL/EVALSHA com cache de SHA, assinatura de canais com thread
+  de leitura e a fila de trabalho com XREADGROUP/XACK/XAUTOCLAIM.
+  Com isso o v1 esta fechado.
 
   COM --tls, o programa INTEIRO roda contra o listener cifrado (6380) em vez do
   de texto claro, e ganha uma secao dedicada ao TLS. Nao e' um modo separado com
@@ -60,6 +61,7 @@ uses
   Redis.Commands.Lists,
   Redis.Commands.Sets,
   Redis.Commands.ZSets,
+  Redis.Commands.Streams,
   Redis.Commands.Scripting,
   Redis.Commands.PubSub,
   Redis.Transaction,
@@ -1295,6 +1297,165 @@ begin
   end;
 end;
 
+{ ---------------------------------------------------------------------------
+  Streams (M8): o unico tipo do Redis com entrega confiavel. A secao percorre
+  o ciclo inteiro de uma fila de trabalho — grava, entrega a dois consumidores
+  do mesmo grupo, deixa um deles "morrer" sem confirmar e recolhe o trabalho
+  abandonado — porque e nesse ciclo que mora a diferenca para o pub/sub da
+  secao anterior: ali, mensagem sem assinante no ar evapora; aqui, ela fica
+  gravada e o servidor lembra quem a recebeu.
+  --------------------------------------------------------------------------- }
+procedure ExercitaStreams;
+var
+  LClient: TRedisClient;
+  LId1, LId2, LProximo: string;
+  LEntradas: TRedisStreamEntryArray;
+  LDados: TRedisStreamDataArray;
+  LResumo: TRedisPendingSummary;
+  LPendencias: TRedisPendingEntryArray;
+  LPrimeiro, LSegundo: TRedisStreamDataArray;
+  LInfo: IRedisReply;
+  LBin, LVolta: TBytes;
+  LInicio: UInt64;
+  I: Integer;
+begin
+  Secao('streams e consumer groups');
+  LClient := TRedisClient.Create(Params);
+  try
+    LClient.Keys.DelMany([Chave('x:log'), Chave('x:fila'), Chave('x:trim'),
+      Chave('x:bin')]);
+
+    { --- o log --- }
+    LId1 := LClient.Streams.XAdd(Chave('x:log'), ['nivel', 'info', 'msg', 'um']);
+    LId2 := LClient.Streams.XAdd(Chave('x:log'), ['nivel', 'erro', 'msg', 'dois']);
+    Passo('XADD gera id crescente', LId2 > LId1, ' -> ' + LId2);
+    Passo('XLEN conta as entradas', LClient.Streams.XLen(Chave('x:log')) = 2);
+
+    LEntradas := LClient.Streams.XRange(Chave('x:log'),
+      REDIS_STREAM_MIN_ID, REDIS_STREAM_MAX_ID);
+    Passo('XRANGE devolve as duas na ordem',
+      (Length(LEntradas) = 2) and (LEntradas[0].Id = LId1));
+    Passo('e os campos saem por nome',
+      LEntradas[1].FieldValue('msg') = 'dois');
+
+    LEntradas := LClient.Streams.XRange(Chave('x:log'),
+      RedisStreamIdExclusive(LId1), REDIS_STREAM_MAX_ID);
+    Passo('extremo aberto pagina sem repetir a ultima lida',
+      (Length(LEntradas) = 1) and (LEntradas[0].Id = LId2));
+
+    LEntradas := LClient.Streams.XRevRange(Chave('x:log'),
+      REDIS_STREAM_MAX_ID, REDIS_STREAM_MIN_ID, 1);
+    Passo('XREVRANGE traz o mais novo primeiro',
+      (Length(LEntradas) = 1) and (LEntradas[0].Id = LId2));
+
+    { --- binario nos campos --- }
+    LBin := MontaBytes([0, 13, 10, 255, 65, 0]);
+    LClient.Streams.XAdd(Chave('x:bin'), ['blob', LBin]);
+    LVolta := LClient.Streams.XRange(Chave('x:bin'), '-', '+')[0]
+      .FieldBytes('blob');
+    // CRLF no meio do valor: se o codec medisse a bulk string pelo
+    // delimitador em vez do comprimento, isto voltaria cortado.
+    Passo('campo binario com CRLF sobrevive ao round-trip',
+      BytesIguais(LBin, LVolta));
+
+    { --- XREAD --- }
+    LDados := LClient.Streams.XRead([Chave('x:log')], [LId1]);
+    Passo('XREAD le so o que veio DEPOIS do id',
+      (Length(LDados) = 1) and (Length(LDados[0].Entries) = 1) and
+      (LDados[0].Entries[0].Id = LId2));
+
+    LInicio := RedisTickMs;
+    LDados := LClient.Streams.XReadBlocking([Chave('x:log')],
+      [REDIS_STREAM_LAST], 700);
+    // BLOCK e em MILISSEGUNDOS, ao contrario do timeout do BLPOP. Prazo
+    // vencido sem novidade e o caso NORMAL de um leitor ocioso.
+    Passo('XREAD BLOCK espera o prazo em ms e volta vazio',
+      (Length(LDados) = 0) and (RedisTickMs - LInicio >= 500));
+
+    { --- trim --- }
+    for I := 1 to 10 do
+      LClient.Streams.XAdd(Chave('x:trim'), ['n', IntToStr(I)]);
+    Passo('XTRIM MAXLEN exato corta o excedente',
+      LClient.Streams.XTrimMaxLen(Chave('x:trim'), 3, False) = 7);
+    Passo('e o que sobra e o FIM do log',
+      LClient.Streams.XRange(Chave('x:trim'), '-', '+')[0].FieldValue('n') = '8');
+
+    { --- consumer group: a fila de trabalho --- }
+    Passo('XGROUP CREATE MKSTREAM cria grupo em stream que nao existe',
+      LClient.Streams.XGroupTryCreate(Chave('x:fila'), 'grupo', '0', True));
+    // Chamar de novo e o que todo worker faz na subida: nao pode ser erro.
+    Passo('e chamar de novo devolve False, sem levantar',
+      not LClient.Streams.XGroupTryCreate(Chave('x:fila'), 'grupo', '0', True));
+
+    LId1 := LClient.Streams.XAdd(Chave('x:fila'), ['t', 'tarefa-1']);
+    LId2 := LClient.Streams.XAdd(Chave('x:fila'), ['t', 'tarefa-2']);
+    LClient.Streams.XAdd(Chave('x:fila'), ['t', 'tarefa-3']);
+
+    LPrimeiro := LClient.Streams.XReadGroup('grupo', 'w1', [Chave('x:fila')],
+      [REDIS_STREAM_NEW], 2);
+    LSegundo := LClient.Streams.XReadGroup('grupo', 'w2', [Chave('x:fila')],
+      [REDIS_STREAM_NEW], 2);
+    // O grupo REPARTE: cada entrada vai para um consumidor so. E a diferenca
+    // para o pub/sub, em que todo assinante recebe tudo.
+    Passo('o grupo reparte o trabalho entre os consumidores',
+      (Length(LPrimeiro[0].Entries) = 2) and (Length(LSegundo[0].Entries) = 1));
+    Passo('e o que sobrou para w2 e a terceira tarefa',
+      LSegundo[0].Entries[0].FieldValue('t') = 'tarefa-3');
+
+    LResumo := LClient.Streams.XPendingSummary(Chave('x:fila'), 'grupo');
+    Passo('entregue e nao confirmado fica pendente no servidor',
+      (LResumo.Count = 3) and (Length(LResumo.Consumers) = 2));
+
+    Passo('XACK confirma e tira da pendencia',
+      LClient.Streams.XAck(Chave('x:fila'), 'grupo', [LId1]) = 1);
+    Passo('e o resumo cai para dois',
+      LClient.Streams.XPendingSummary(Chave('x:fila'), 'grupo').Count = 2);
+
+    { --- w1 "morre" e w2 recolhe --- }
+    LEntradas := LClient.Streams.XClaim(Chave('x:fila'), 'grupo', 'w2', 600000,
+      [LId2]);
+    // Recem-entregue: um XCLAIM de 10 minutos nao rouba. E a protecao contra
+    // dois workers processando a mesma coisa.
+    Passo('XCLAIM com minimo alto nao rouba trabalho em andamento',
+      Length(LEntradas) = 0);
+
+    LEntradas := LClient.Streams.XAutoClaim(Chave('x:fila'), 'grupo', 'w2', 0,
+      '0-0', 10, LProximo);
+    Passo('XAUTOCLAIM recolhe o que o worker morto deixou',
+      Length(LEntradas) = 2);
+    Passo('e o cursor volta 0-0 quando a varredura acaba', LProximo = '0-0');
+
+    LPendencias := LClient.Streams.XPendingRange(Chave('x:fila'), 'grupo',
+      '-', '+', 10);
+    Passo('a pendencia trocou de dono, nao sumiu',
+      (Length(LPendencias) = 2) and (LPendencias[0].Consumer = 'w2'));
+    Passo('e o contador de entregas subiu',
+      LPendencias[0].DeliveryCount >= 2);
+
+    { --- entrada apagada continua na PEL --- }
+    LClient.Streams.XDel(Chave('x:fila'), [LId2]);
+    LDados := LClient.Streams.XReadGroup('grupo', 'w2', [Chave('x:fila')],
+      [REDIS_STREAM_PENDING]);
+    // XDEL tira do STREAM, nao da PEL: o id volta sem campos, e um leitor
+    // ingenuo levantaria bem aqui.
+    Passo('entrada apagada volta na PEL sem campos',
+      (Length(LDados[0].Entries) = 2) and LDados[0].Entries[0].IsDeleted);
+
+    { --- introspeccao --- }
+    LInfo := LClient.Streams.XInfoGroups(Chave('x:fila'));
+    Passo('XINFO GROUPS enxerga o grupo e a pendencia',
+      (LInfo.Count = 1) and
+      (LInfo[0].ValueByKey('name').AsString = 'grupo') and
+      (LInfo[0].ValueByKey('pending').AsInteger = 2));
+
+    LClient.Keys.DelMany([Chave('x:log'), Chave('x:fila'), Chave('x:trim'),
+      Chave('x:bin')]);
+  finally
+    LClient.Free;
+  end;
+end;
+
+
 procedure Executa;
 var
   LConn: TRedisConnection;
@@ -1311,7 +1472,7 @@ begin
     LTextoTls := ' (nao exercitado; rode com --tls)';
   end;
 
-  WriteLn('pascal-redis-faa :: smoke test M7');
+  WriteLn('pascal-redis-faa :: smoke test M8');
   WriteLn('  alvo ......... ', HOST, ':', Params.Port, LTextoModo);
   WriteLn('  compilador ... ', {$IFDEF FPC} 'FPC ' + {$I %FPCVERSION%} {$ELSE} 'Delphi' {$ENDIF});
   WriteLn('  backend TLS .. ', RedisTlsBackendName, LTextoTls);
@@ -1343,6 +1504,7 @@ begin
   ExercitaFamilias;
   ExercitaTransacoes;
   ExercitaPubSub;
+  ExercitaStreams;
   ExercitaInvalidacao;
 end;
 

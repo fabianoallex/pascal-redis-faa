@@ -167,7 +167,7 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
 
 ## Estrutura de units
 
-Existentes (M0 a M7):
+Existentes (M0 a M8):
 
 ```
 src/redis.inc
@@ -186,6 +186,7 @@ src/Redis.Commands.Hashes.pas    HSET HGET HGETALL HMGET HDEL HINCRBY HSCAN
 src/Redis.Commands.Lists.pas     LPUSH RPOP LRANGE LMOVE + BLPOP/BRPOP/BLMOVE
 src/Redis.Commands.Sets.pas      SADD SMEMBERS SMISMEMBER SINTER/SUNION/SDIFF SSCAN
 src/Redis.Commands.ZSets.pas     ZADD ZRANGE ZRANGEBYSCORE ZINCRBY ZPOPMIN ZSCAN
+src/Redis.Commands.Streams.pas   XADD XRANGE XREAD XGROUP XREADGROUP XACK XPENDING XCLAIM XAUTOCLAIM XINFO
 src/Redis.Commands.Scripting.pas EVAL/EVALSHA com cache de SHA, SCRIPT LOAD/EXISTS/FLUSH
 src/Redis.Commands.PubSub.pas    PUBLISH SPUBLISH PUBSUB CHANNELS/NUMSUB/NUMPAT (quem publica)
 src/Redis.Transaction.pas        TRedisTransaction: MULTI/EXEC/WATCH em um pipeline só
@@ -197,9 +198,12 @@ Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e*
 `packages/pascal_redis_faa.pas`):
 
 ```
-src/Redis.Commands.Streams.pas    XADD XREADGROUP XACK XAUTOCLAIM
 src/Redis.Commands.Server.pas     PING INFO CONFIG DBSIZE FLUSHDB
 ```
+
+A `Redis.Commands.Server` é a **única** peça da lista original que o v1 não entregou.
+Não bloqueia ninguém: `Execute('INFO', [])` alcança qualquer comando desde o M2, e a
+`TRedisConnection` já expõe `Ping` e `Select`. Fica como primeiro candidato pós-v1.
 
 Princípio: **kernel genérico primeiro**. `Execute('SET', ['k','v'])` alcança qualquer
 comando desde o M2; as fachadas tipadas por família são camadas por cima. Assim o escopo
@@ -235,7 +239,7 @@ nunca bloqueia o usuário da lib.
   **Rode o SmokeTest após qualquer mudança na lib.**
 - **SmokeTest com TLS (M5):** `SmokeTest.exe --tls` roda a bateria INTEIRA contra o
   listener cifrado (6380) em vez do de texto claro, e acrescenta a seção de TLS —
-  135 passos contra os 126 do modo plain. Desde o M7 ele vale ainda mais: pub/sub é o
+  160 passos contra os 151 do modo plain. Desde o M7 ele vale ainda mais: pub/sub é o
   único caso em que uma thread lê e outra escreve no mesmo envelope TLS ao mesmo tempo.
   Precisa dos certs e do override de pé:
   `docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`. Rode nos
@@ -244,7 +248,7 @@ nunca bloqueia o usuário da lib.
   digitado errado rodaria em texto claro com cara de sucesso.
 - **TLS fica FORA da suíte de integração**, de propósito: ela precisa valer com só o
   `docker-compose.yml` de pé, sem certs. Quem exercita TLS é o SmokeTest.
-- **Suítes unitárias (M1–M7, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
+- **Suítes unitárias (M1–M8, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
   (FPCUnit). Não precisam de servidor — a `Redis.ConnectionTests` sobe a conexão inteira
   sobre um servidor falso em memória (`TRedisConnection.CreateOnStream`), e a
   `Redis.CommandsTests` amarra um `TRedisClient` a esse mesmo servidor falso para conferir
@@ -253,10 +257,12 @@ nunca bloqueia o usuário da lib.
   confirmação), porque sem diálogo não dá para testar confirmação, ordem de mensagens nem
   queda de conexão. Ele também desiste da leitura depois de 10 s — trava de segurança para
   que um teste mal escrito não pendure a suíte na thread de leitura. **Esse é o padrão a
-  reusar sempre que o teste depender de diálogo** e não de resposta roteirizada (o M8 vai
-  precisar dele para `XREADGROUP`/`XACK`): o fake interpreta o que o cliente escreveu,
-  mantém o estado mínimo do servidor e responde — e a leitura BLOQUEIA quando não há nada,
-  como um socket em silêncio. Rodar as do FPC com
+  reusar sempre que o teste depender de diálogo** e não de resposta roteirizada: o fake
+  interpreta o que o cliente escreveu, mantém o estado mínimo do servidor e responde — e a
+  leitura BLOQUEIA quando não há nada, como um socket em silêncio. O M8 avaliou usá-lo e
+  **não** precisou: streams não têm thread nem diálogo, e o que interessa ali (ordem dos
+  modificadores, mapa do RESP3, entrada sem campos) o roteiro fixo verifica melhor, porque
+  é o teste que escolhe a resposta. Ver a seção 48 de `docs/DECISOES.md`. Rodar as do FPC com
   `lazbuild -B tests\Unit\fpc\RedisUnitTestsFpc.lpi` e depois
   `tests\Unit\fpc\RedisUnitTestsFpc.exe --all --format=plain` (sem parâmetros abre a GUI).
   As do Delphi só pelo IDE, via `Redis.groupproj`.
@@ -276,13 +282,16 @@ nunca bloqueia o usuário da lib.
   (d) `TDUnitX.RegisterTestFixture(X)` por `RegisterTest(X)`. Acrescente `{$mode delphi}{$H+}`
   antes do `interface`. Depois um `diff` dos dois arquivos tem de mostrar **só** essas
   quatro coisas — é a prova barata de que a cobertura não divergiu.
-- **Suíte de integração (M3–M7, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
+- **Suíte de integração (M3–M8, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
   `Redis.IntegrationSuite.dproj`) + `tests/Integration/fpc` (FPCUnit). **Precisa do
   container de pé.** O M4 acrescentou uma fixture por família, mais a do
   `TRedisClient`; o M7, a de pub/sub — que inclui o teste de **reconexão** (derruba a
   conexão do assinante com `CLIENT KILL ID` e confere que as assinaturas voltaram, pelo
-  `PUBSUB NUMSUB` do servidor, não pela contabilidade do cliente). Mesma regra de
-  paridade das unitárias — corpo idêntico, só as fixtures mudam. Rodar as do FPC com
+  `PUBSUB NUMSUB` do servidor, não pela contabilidade do cliente); o M8, a de streams,
+  com o ciclo inteiro de uma fila de trabalho (dois consumidores repartindo as entradas,
+  pendência sobrevivendo ao worker morto e voltando por `XAUTOCLAIM`, `XCLAIM` que não
+  rouba trabalho recente). Mesma regra de paridade das unitárias — corpo idêntico, só as
+  fixtures mudam. Rodar as do FPC com
   `lazbuild -B tests\Integration\fpc\RedisIntegrationTestsFpc.lpi` e depois
   `tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain`.
   O programa Delphi se chama `Redis.IntegrationSuite` porque a **unit** já se chama
@@ -546,7 +555,46 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
      `PUBSUB CHANNELS` com um canal chamado `subscribe` viraria confirmação fantasma).
    - **Mensagem publicada com o assinante fora do ar está perdida**, e a lib não finge o
      contrário com fila local. `PUBLISH` devolve quantos receberam NAQUELE instante.
-8. **M8 — Streams + consumer groups.** Fecha o v1.
+8. ~~**M8 — Streams + consumer groups.**~~ **Concluído em 2026-08-23.** Fecha o v1.
+   `Redis.Commands.Streams` (`TRedisStreamsCommands`: XADD/XRANGE/XREVRANGE/XTRIM,
+   XREAD com e sem BLOCK, XGROUP CREATE/DESTROY/SETID/CREATECONSUMER/DELCONSUMER,
+   XREADGROUP com e sem BLOCK, XACK, XPENDING nas duas formas, XCLAIM/XAUTOCLAIM e
+   XINFO), mais a propriedade `Streams` no `TRedisClient`. **Nada no kernel foi
+   alterado**: `Redis.Connection`, `Redis.Pool` e `Redis.Commands` saíram sem uma linha
+   mudada — o `ExecuteBlocking` do M4 já servia aos dois bloqueantes novos.
+   **Validado nos DOIS compiladores** contra o container (2026-08-23): SmokeTest **PASS
+   nos 151 passos** e **160 com `--tls`**, no FPC nas quatro combinações de
+   SChannel/OpenSSL x fpc direto/lazbuild e no Delphi 12 nas configurações Debug e
+   OpenSSL; unitárias **436/436** (376 + 60) e integração **69/69** (55 + 14), com
+   `Tests Leaked: 0` nas duas configurações do Delphi — inclusive na de integração, onde
+   vazar significaria conexão que ninguém fechou. As contagens IDÊNTICAS dos dois lados
+   são o que confirma a paridade de cobertura das suítes gêmeas.
+
+   Ao contrário do M7, a rodada no Delphi não derrubou nada: nenhum ajuste foi preciso
+   depois dela. Os quatro arquivos de projeto do Delphi ganharam a unit nova
+   (`Redis.UnitTests.dpr`/`.dproj` e `Redis.IntegrationSuite.dpr`/`.dproj`); o
+   `SmokeTest.dproj` alcança a `src` pelo search path e não precisou mudar.
+
+   Decisões tomadas aqui (racional nas seções 43–48 de `docs/DECISOES.md`):
+   - **Entrada sem campos é `nil`, não dicionário vazio.** `XDEL` tira do stream mas não
+     da PEL: reler a PEL alcança ids que já não existem, e o servidor manda os campos
+     nulos. `IsDeleted` lê isso por extenso. Levantar quebraria justo a rotina de
+     recuperação de quem perdeu um worker.
+   - **`XREAD`/`XREADGROUP` mudam de forma entre RESP2 (lista de pares) e RESP3 (mapa)**,
+     e quem absorve é `RedisReplyToStreamData`, decidindo pela forma do primeiro item —
+     a mesma solução do `WITHSCORES` no M4. E **chave sem novidade não aparece na
+     resposta**: o nome vem junto de cada bloco, e `RedisFindStreamData` procura por ele.
+     Indexar pela posição da chamada lê a chave errada na primeira vez que uma fica quieta.
+   - **`BLOCK` fica em MILISSEGUNDOS na API pública**, porque é a unidade do comando —
+     ao contrário do timeout do `BLPOP`, que é em segundos. Uniformizar esconderia um
+     erro de fator 1000, que não estoura: só espera o tempo errado. A conversão para
+     `ExecuteBlocking` acontece num lugar só.
+   - **`BUSYGROUP` é recado, não falha — mas só ele.** `XGroupTryCreate` devolve False
+     quando o grupo já existia (é o que todo worker vê ao subir depois do primeiro);
+     qualquer outro erro sobe. Mesma forma do `NOSCRIPT` no M6.
+   - **`XAUTOCLAIM` aceita resposta de dois e de três itens** (Redis 6.2 x 7.0). Não há
+     detecção de versão em lugar nenhum da lib: a forma da resposta é a informação, e ela
+     chega junto com o dado.
 9. **M9 — 3 samples GUI duais VCL/LCL:** `CacheAsideVcl` (GET/SETEX/DEL, hit/miss),
    `LockDistribuidoVcl` (`SET NX PX` + token de posse, release por Lua — mostra o erro
    clássico de liberar lock alheio) e `FilaTarefasVcl` (Streams + consumer groups, dois

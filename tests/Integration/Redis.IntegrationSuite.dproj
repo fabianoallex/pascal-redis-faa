@@ -136,6 +136,7 @@
         <DCCReference Include="..\..\src\Redis.Commands.Lists.pas"/>
         <DCCReference Include="..\..\src\Redis.Commands.Sets.pas"/>
         <DCCReference Include="..\..\src\Redis.Commands.ZSets.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.Streams.pas"/>
         <DCCReference Include="..\..\src\Redis.Commands.Scripting.pas"/>
         <DCCReference Include="..\..\src\Redis.Transaction.pas"/>
         <DCCReference Include="..\..\src\Redis.Commands.PubSub.pas"/>

@@ -3,27 +3,31 @@
 Cliente **Redis** (protocolo RESP2/RESP3) para **Free Pascal/Lazarus e Delphi**, numa
 única codebase, escrito do zero. Licença MIT.
 
-> **Status: em construção (M7 — pub/sub).** Já dá para conectar, autenticar, executar
+> **Status: v1 completo (M8 — streams).** Dá para conectar, autenticar, executar
 > **qualquer** comando do Redis, usar pipeline, trabalhar com um pool de conexões com
-> timeout de verdade, chamar os comandos de Keys, Strings, Hashes, Lists, Sets e ZSets
-> pela fachada tipada — inclusive os bloqueantes — em RESP2 ou RESP3, cifrar tudo isso
-> com TLS, usar `MULTI`/`EXEC`/`WATCH` e scripts Lua com cache de SHA, e publicar e
-> assinar canais. Ainda faltam streams (M8). O roadmap completo está em `CLAUDE.md`.
+> timeout de verdade, chamar os comandos de Keys, Strings, Hashes, Lists, Sets, ZSets e
+> Streams pela fachada tipada — inclusive os bloqueantes — em RESP2 ou RESP3, cifrar tudo
+> isso com TLS, usar `MULTI`/`EXEC`/`WATCH` e scripts Lua com cache de SHA, publicar e
+> assinar canais, e montar fila de trabalho com consumer groups. O que falta são os
+> samples GUI (M9) e a validação em Linux (M10). O roadmap completo está em `CLAUDE.md`.
 
 Projeto irmão da [`pascal-amqp-faa`](../pascal-amqp-faa) (cliente AMQP 0-9-1) e da
 `pascal-pipes-faa` (IPC), com as mesmas regras: codebase dual FPC 3.2.2 + Delphi 12,
 sem dependências externas, TLS nativo em Windows (SChannel) e OpenSSL opt-in em
 qualquer plataforma.
 
-## O que vai existir no v1
+## O que o v1 entrega
 
 | Área | Conteúdo |
 |---|---|
 | Núcleo | codec RESP2/RESP3, conexão, pool de conexões, timeouts, reconexão |
-| Comandos | Keys, Strings, Hashes, Lists, Sets, ZSets, Server |
+| Comandos | Keys, Strings, Hashes, Lists, Sets, ZSets, Streams |
 | Avançado | pipelining, `MULTI`/`EXEC`/`WATCH`, scripting (`EVAL`/`EVALSHA` com cache de SHA) |
 | Mensageria | Pub/Sub (conexão dedicada) e Streams com consumer groups |
 | Segurança | TLS via SChannel (Windows) ou OpenSSL (`-dREDIS_OPENSSL`, qualquer plataforma) |
+
+Comando de servidor (`PING`, `INFO`, `CONFIG`, `DBSIZE`) ainda não tem fachada própria —
+sai pelo `Execute` genérico, que alcança qualquer comando do Redis.
 
 **Fora do v1:** Redis Cluster (redirects `MOVED`/`ASK`), Sentinel e client-side
 caching (`CLIENT TRACKING`).
@@ -437,7 +441,7 @@ O que a lib garante e o que não garante:
   aplicação. Exceção que escape do callback vai para o `OnError` e não derruba a conexão.
 - **Entrega, não.** Mensagem publicada enquanto o assinante estava fora do ar está
   perdida — sem fila, sem replay. Quem precisa de entrega garantida usa Streams com
-  consumer group (M8).
+  consumer group (seção seguinte).
 - **Reconexão, sim** (`AutoReconnect`, ligado por padrão): a conexão volta e as
   assinaturas são reenviadas, com `OnDisconnected`/`OnReconnected` avisando. O que se
   perdeu no intervalo continua perdido.
@@ -455,6 +459,102 @@ LSub.Execute('SET', ['ultima-leitura', '2026-08-23']);   // só vale em RESP3
 `PUBSUB CHANNELS`, `NUMSUB` e `NUMPAT` respondem pelo lado de quem publica
 (`LClient.PubSub.ActiveChannels`, `CountSubscribers`, `NumPatterns`) — úteis para
 diagnóstico, não para lógica de aplicação: a resposta envelhece no caminho de volta.
+
+### Streams e consumer groups
+
+Stream é o único tipo do Redis com **entrega confiável**. A diferença para o pub/sub cabe
+numa frase: ali, mensagem publicada sem assinante no ar evapora; aqui, ela fica gravada, e
+o consumer group ainda registra quem a recebeu e se ela foi confirmada.
+
+Gravar e ler é um log append-only com id crescente:
+
+```pascal
+uses
+  Redis.Types, Redis.Client, Redis.Commands.Streams;
+
+var
+  LId: string;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  // '*' pede o próximo id ao servidor: <ms>-<sequência>, sempre crescente.
+  LId := LClient.Streams.XAdd('eventos', ['tipo', 'venda', 'valor', '199.90']);
+
+  // MAXLEN ~ 1000 mantém "mil e pouco" entradas — muito mais barato que o
+  // corte exato, e é o que se usa em produção.
+  LClient.Streams.XAddMaxLen('eventos', 1000, True, ['tipo', 'login']);
+
+  LEntradas := LClient.Streams.XRange('eventos',
+    REDIS_STREAM_MIN_ID, REDIS_STREAM_MAX_ID);
+  WriteLn(LEntradas[0].FieldValue('tipo'));    // campos por nome
+end;
+```
+
+A fila de trabalho é o consumer group. Cada entrada vai para **um** consumidor do grupo, e
+fica pendente (na PEL, a *pending entries list*) até o `XACK`:
+
+```pascal
+var
+  LDados: TRedisStreamDataArray;
+  I: Integer;
+begin
+  // MKSTREAM cria a chave se ela ainda não existe — o caso de todo consumidor
+  // que sobe antes do produtor. TryCreate devolve False se o grupo já existia,
+  // então todo worker pode chamar isto na subida sem try/except.
+  LClient.Streams.XGroupTryCreate('eventos', 'processadores', '0', True);
+
+  // '>' é o que nunca foi entregue a ninguém do grupo. BLOCK é em
+  // MILISSEGUNDOS (o timeout do BLPOP é em segundos — não confunda), e sai por
+  // uma conexão fora do pool comum.
+  LDados := LClient.Streams.XReadGroupBlocking('processadores', 'worker-1',
+    ['eventos'], [REDIS_STREAM_NEW], 5000, 10);
+
+  if Length(LDados) > 0 then
+    for I := 0 to High(LDados[0].Entries) do
+    begin
+      Processa(LDados[0].Entries[I]);
+      // Sem XACK a entrada fica pendente para sempre: é o vazamento clássico
+      // de consumer group.
+      LClient.Streams.XAck('eventos', 'processadores',
+        [LDados[0].Entries[I].Id]);
+    end;
+end;
+```
+
+Worker que morre no meio deixa a entrada na PEL, e é isso que torna a entrega confiável.
+Recolher o trabalho abandonado é um comando só:
+
+```pascal
+var
+  LProximo: string;
+  LEntradas: TRedisStreamEntryArray;
+begin
+  // Reivindica o que está parado há mais de 60 s. O mínimo de ociosidade é a
+  // proteção contra dois workers processando a mesma entrada: quem está
+  // trabalhando há 200 ms não é roubado.
+  LEntradas := LClient.Streams.XAutoClaim('eventos', 'processadores',
+    'worker-2', 60000, '0-0', 100, LProximo);
+  // LProximo é cursor, com a mecânica do SCAN: repita até voltar '0-0'.
+end;
+```
+
+Três detalhes que a lib absorve e que costumam morder:
+
+- **`XREAD`/`XREADGROUP` mudam de forma entre RESP2 e RESP3** (lista de pares contra
+  mapa). A fachada devolve sempre `TRedisStreamDataArray`, então a aplicação não ramifica
+  por protocolo. Chave sem novidade **não aparece** na resposta — use
+  `RedisFindStreamData` para achar pelo nome, nunca pela posição da chamada.
+- **Entrada pode vir sem campos.** `XDEL` tira do stream mas não da PEL: reler a PEL
+  alcança ids que já não existem, e aí `Fields` é `nil` (`IsDeleted`). Não é erro — é o
+  estado normal de uma pendência sobre entrada apagada.
+- **`'>'` contra `'0'`.** `XREADGROUP` com `REDIS_STREAM_NEW` pede o que nunca foi
+  entregue e cria pendência; com `REDIS_STREAM_PENDING` relê a PEL **deste** consumidor,
+  que é como um worker retoma o próprio trabalho depois de reiniciar. Trocar um pelo outro
+  é o erro clássico.
+
+`XPendingSummary`/`XPendingRange` respondem quem está devendo o quê (com ociosidade e
+contador de entregas — contador alto denuncia mensagem venenosa, que derruba todo worker
+que a pega), e `XInfoStream`/`XInfoGroups`/`XInfoConsumers` entregam a introspecção do
+servidor como mapa achatado.
 
 ## Build
 
@@ -486,7 +586,11 @@ aqui também: o `EXEC` nulo, o comando recusado na fila e o `NOSCRIPT` são esta
 servidor real quase nunca produz sob demanda, mas que o servidor falso entrega de graça.
 O pub/sub tem um servidor falso que **responde** — ele interpreta o `SUBSCRIBE` e devolve
 a confirmação —, porque sem diálogo não há como testar confirmação de assinatura, ordem
-das mensagens, callback que levanta nem queda de conexão.
+das mensagens, callback que levanta nem queda de conexão. Os streams voltam ao roteiro
+fixo: o que interessa ali é a montagem do comando (`MAXLEN ~` antes do id, `STREAMS` como
+último modificador, `BLOCK` em milissegundos) e a leitura de respostas que o servidor real
+raramente produz sob demanda — entrada apagada que sobrou na PEL, `XAUTOCLAIM` sem a
+lista de apagados do Redis 6.2.
 
 **FPC/Lazarus (FPCUnit):**
 
@@ -507,7 +611,10 @@ mesmo pool e uma bateria por família de comandos contra o servidor real — inc
 WITHSCORES` devolvem o mesmo resultado em RESP2 e em RESP3. O pub/sub entra com a
 difusão para vários assinantes e com a reconexão: a conexão do assinante é derrubada por
 `CLIENT KILL` e quem confirma que as assinaturas voltaram é o **servidor**, pelo
-`PUBSUB NUMSUB`, não a contabilidade do cliente.
+`PUBSUB NUMSUB`, não a contabilidade do cliente. Os streams entram com o ciclo inteiro de
+uma fila de trabalho: dois consumidores do mesmo grupo repartindo as entradas, a pendência
+que sobrevive ao worker que morreu e volta por `XAUTOCLAIM`, o `XCLAIM` que **não** rouba
+trabalho em andamento e o `XREAD BLOCK` com prazo maior que o read timeout do socket.
 
 **TLS fica de fora daqui de propósito:** esta suíte tem de valer com só o
 `docker-compose.yml` de pé, sem certificado nenhum. Quem exercita TLS é o smoke
@@ -533,8 +640,8 @@ Precisa do container de pé (seção anterior).
 ```
 cd samples\SmokeTest
 lazbuild SmokeTest.lpi
-SmokeTest.exe          # 126 passos, texto claro (6379)
-SmokeTest.exe --tls    # 135 passos, tudo cifrado (6380) + a seção de TLS
+SmokeTest.exe          # 151 passos, texto claro (6379)
+SmokeTest.exe --tls    # 160 passos, tudo cifrado (6380) + a seção de TLS
 ```
 
 Sai com código 0 se todos os passos passarem, e 2 se receber um argumento
