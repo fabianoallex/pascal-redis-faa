@@ -177,6 +177,8 @@ src/Redis.Commands.Hashes.pas    HSET HGET HGETALL HMGET HDEL HINCRBY HSCAN
 src/Redis.Commands.Lists.pas     LPUSH RPOP LRANGE LMOVE + BLPOP/BRPOP/BLMOVE
 src/Redis.Commands.Sets.pas      SADD SMEMBERS SMISMEMBER SINTER/SUNION/SDIFF SSCAN
 src/Redis.Commands.ZSets.pas     ZADD ZRANGE ZRANGEBYSCORE ZINCRBY ZPOPMIN ZSCAN
+src/Redis.Commands.Scripting.pas EVAL/EVALSHA com cache de SHA, SCRIPT LOAD/EXISTS/FLUSH
+src/Redis.Transaction.pas        TRedisTransaction: MULTI/EXEC/WATCH em um pipeline só
 src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico
 ```
 
@@ -184,11 +186,9 @@ Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e*
 `packages/pascal_redis_faa.pas`):
 
 ```
-src/Redis.Commands.Scripting.pas  EVAL/EVALSHA + cache de SHA
 src/Redis.Commands.Streams.pas    XADD XREADGROUP XACK XAUTOCLAIM
 src/Redis.Commands.Server.pas     PING INFO CONFIG DBSIZE FLUSHDB
 src/Redis.PubSub.pas              conexao dedicada + thread + callbacks
-src/Redis.Transaction.pas         MULTI/EXEC/WATCH
 ```
 
 Princípio: **kernel genérico primeiro**. `Execute('SET', ['k','v'])` alcança qualquer
@@ -232,7 +232,7 @@ nunca bloqueia o usuário da lib.
   digitado errado rodaria em texto claro com cara de sucesso.
 - **TLS fica FORA da suíte de integração**, de propósito: ela precisa valer com só o
   `docker-compose.yml` de pé, sem certs. Quem exercita TLS é o SmokeTest.
-- **Suítes unitárias (M1–M4, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
+- **Suítes unitárias (M1–M6, prontas):** `tests/Unit` (DUnitX/Delphi) + `tests/Unit/fpc`
   (FPCUnit). Não precisam de servidor — a `Redis.ConnectionTests` sobe a conexão inteira
   sobre um servidor falso em memória (`TRedisConnection.CreateOnStream`), e a
   `Redis.CommandsTests` amarra um `TRedisClient` a esse mesmo servidor falso para conferir
@@ -247,7 +247,7 @@ nunca bloqueia o usuário da lib.
   `Assert.AreEqual(string, string)` do DUnitX ignora caixa por padrão, o que enfraqueceria
   os testes em silêncio e só do lado Delphi). Ao mexer numa suíte, portar para a outra na
   mesma sessão; conferir com um `diff` das seções de implementation.
-- **Suíte de integração (M3 + M4, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
+- **Suíte de integração (M3–M6, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
   `Redis.IntegrationSuite.dproj`) + `tests/Integration/fpc` (FPCUnit). **Precisa do
   container de pé.** O M4 acrescentou uma fixture por família, mais a do
   `TRedisClient`. Mesma regra de paridade das unitárias — corpo idêntico, só as
@@ -426,7 +426,33 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    - **Stream adotado (`CreateOnStream`) ignora `UseTls`**: ele já É o transporte pronto, e
      cifrar por cima seria TLS dentro de TLS. É o que mantém as suítes unitárias rodando
      sem rede mesmo com `UseTls` nos parâmetros.
-6. **M6 — `MULTI`/`EXEC`/`WATCH` + `EVAL` com cache de SHA** (o pipeline já saiu no M2).
+6. ~~**M6 — `MULTI`/`EXEC`/`WATCH` + `EVAL` com cache de SHA**~~ **Concluído em
+   2026-08-23.** `Redis.Transaction` (`TRedisTransaction` com `Watch`/`Queue`/`TryCommit`/
+   `Discard`) e `Redis.Commands.Scripting` (`Eval`/`EvalSha`/`Run` com cache, `SCRIPT
+   LOAD`/`EXISTS`/`FLUSH`), mais `BeginTransaction` e `Scripting` no `TRedisClient`.
+   **Validado nos DOIS compiladores** contra o container (2026-08-23): SmokeTest **PASS
+   nos 108 passos** e **117 com `--tls`**, no FPC (SChannel/OpenSSL x fpc direto/lazbuild)
+   e no Delphi 12 (configurações Debug e OpenSSL); unitárias **339/339** (305 + 34 do M6)
+   e integração **45/45** (34 + 11), com `Tests Leaked: 0` — no Delphi as duas suítes
+   rodaram nas **duas** configurações, o que fecha a matriz compilador x backend também
+   para os testes, e não só para o SmokeTest.
+
+   Decisões tomadas aqui (racional nas seções 34–36 de `docs/DECISOES.md`):
+   - **`MULTI`/`EXEC` não é rollback.** Erro de execução de um comando vem como item
+     `rkError` no array e os outros ficam gravados; `Commit` **não** levanta por isso —
+     levantar faria o chamador concluir que nada foi gravado. O que levanta é comando
+     recusado no *enfileiramento*, e a mensagem cita qual.
+   - **O bloco inteiro sai num pipeline só** (`MULTI` + comandos + `EXEC`), reusando o
+     `TRedisPipeline` do M2: uma ida e volta em vez de N+2. Daí o `Discard` não precisar
+     ir ao fio e o bloco VAZIO precisar (sob `WATCH` ele é uma pergunta legítima).
+   - **`WATCH` é estado da CONEXÃO**, então a transação segura uma conexão inteira e o
+     destrutor manda `UNWATCH` se houve vigilância sem commit — senão o `EXEC` do próximo
+     usuário do pool abortaria sem motivo aparente.
+   - **O SHA é calculado localmente, sobre os BYTES UTF-8.** Hashear a representação da
+     `string` daria digest diferente do servidor com qualquer acento no script, e o
+     `EVALSHA` responderia `NOSCRIPT` para sempre com o cache "funcionando".
+   - **`NOSCRIPT` não é erro, é recado:** `Run` reenvia o `EVAL` sozinha e quem chamou não
+     vê nada. Erro do próprio Lua sobe — reenviar só repetiria a falha.
 7. **M7 — Pub/Sub (RESP2) + RESP3 opt-in via `HELLO 3`.**
 8. **M8 — Streams + consumer groups.** Fecha o v1.
 9. **M9 — 3 samples GUI duais VCL/LCL:** `CacheAsideVcl` (GET/SETEX/DEL, hit/miss),

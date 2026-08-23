@@ -136,6 +136,8 @@
         <DCCReference Include="..\..\src\Redis.Commands.Lists.pas"/>
         <DCCReference Include="..\..\src\Redis.Commands.Sets.pas"/>
         <DCCReference Include="..\..\src\Redis.Commands.ZSets.pas"/>
+        <DCCReference Include="..\..\src\Redis.Commands.Scripting.pas"/>
+        <DCCReference Include="..\..\src\Redis.Transaction.pas"/>
         <DCCReference Include="..\..\src\Redis.Client.pas"/>
         <DCCReference Include="..\Unit\Redis.DUnitXCompat.pas"/>
         <DCCReference Include="Redis.IntegrationTests.pas"/>

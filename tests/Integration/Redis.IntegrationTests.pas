@@ -43,6 +43,8 @@ uses
   Redis.Commands.Lists,
   Redis.Commands.Sets,
   Redis.Commands.ZSets,
+  Redis.Commands.Scripting,
+  Redis.Transaction,
   Redis.DUnitXCompat;
 
 type
@@ -141,6 +143,27 @@ type
     [Test] procedure ZRangeWithScores_MesmoResultadoEmResp2EResp3;
     [Test] procedure ZRangeByScore_FaixaAbertaELimite;
     [Test] procedure ZPopMin_EsvaziaDoMenorParaOMaior;
+  end;
+
+  [TestFixture]
+  TRedisTransactionIntegrationTests = class
+  public
+    [Test] procedure Transacao_RodaOBlocoInteiro;
+    [Test] procedure Watch_AbortaQuandoOutraConexaoMexeNaChave;
+    [Test] procedure Watch_NaoAbortaQuandoNinguemMexe;
+    [Test] procedure ErroNoMeioDoBloco_NaoDesfazOsOutros;
+    [Test] procedure Transacao_DevolveAConexaoAoPool;
+    [Test] procedure WatchPendente_NaoContaminaAProximaTransacao;
+  end;
+
+  [TestFixture]
+  TRedisScriptingIntegrationTests = class
+  public
+    [Test] procedure Eval_ExecutaLuaEConverteOsTipos;
+    [Test] procedure ScriptLoad_OShaDoServidorBateComOLocal;
+    [Test] procedure Run_SegundaChamadaUsaOCache;
+    [Test] procedure Run_AposScriptFlush_SeRecuperaSozinho;
+    [Test] procedure LockDistribuido_SoQuemTemOTokenLibera;
   end;
 
 implementation
@@ -1451,6 +1474,371 @@ begin
   end;
 end;
 
+{ --- M6: transacoes e scripting --- }
+
+const
+  { O release de lock que NAO existe sem script: comparar o token e apagar tem
+    de acontecer na mesma passagem. Com GET seguido de DEL, o lock pode expirar
+    entre os dois e ser tomado por outra pessoa — e o DEL apagaria o lock DELA. }
+  SCRIPT_LIBERA_LOCK =
+    'if redis.call("GET", KEYS[1]) == ARGV[1] then' + #10 +
+    '  return redis.call("DEL", KEYS[1])' + #10 +
+    'else' + #10 +
+    '  return 0' + #10 +
+    'end';
+
+{ TRedisTransactionIntegrationTests }
+
+procedure TRedisTransactionIntegrationTests.Transacao_RodaOBlocoInteiro;
+var
+  LClient: TRedisClient;
+  LTx: TRedisTransaction;
+  LRespostas: TRedisReplyArray;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['tx:n']);
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Queue('INCR', [Chave('tx:n')]);
+      LTx.Queue('INCRBY', [Chave('tx:n'), 10]);
+      LTx.Queue('GET', [Chave('tx:n')]);
+      LRespostas := LTx.Commit;
+    finally
+      LTx.Free;
+    end;
+
+    TAssert.AssertEquals(3, Length(LRespostas));
+    TAssert.AssertEquals(Int64(1), LRespostas[0].AsInteger);
+    TAssert.AssertEquals(Int64(11), LRespostas[1].AsInteger);
+    TAssert.AssertEquals('11', LRespostas[2].AsString);
+
+    LimpaChaves(LClient, ['tx:n']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisTransactionIntegrationTests.Watch_AbortaQuandoOutraConexaoMexeNaChave;
+var
+  LClient: TRedisClient;
+  LTx: TRedisTransaction;
+  LIntruso: TRedisConnection;
+  LRespostas: TRedisReplyArray;
+  LSaldo: Int64;
+begin
+  LClient := NovoCliente;
+  try
+    LClient.Strings.SetValue(Chave('tx:saldo'), '500');
+
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Watch([Chave('tx:saldo')]);
+      // A leitura acontece FORA do bloco — dentro dele nao ha' leitura, e e'
+      // por isso que o WATCH existe.
+      LSaldo := LTx.Connection.Execute('GET', [Chave('tx:saldo')]).AsInteger;
+
+      // Outra conexao mexe na chave vigiada, entre o WATCH e o EXEC.
+      LIntruso := AbreConexao;
+      try
+        LIntruso.Execute('SET', [Chave('tx:saldo'), '999']);
+      finally
+        LIntruso.Free;
+      end;
+
+      LTx.Queue('SET', [Chave('tx:saldo'), LSaldo - 100]);
+      // False, e nao excecao: sob concorrencia isto e' o funcionamento normal
+      // do check-and-set, e quem chama recomeca o ciclo.
+      TAssert.AssertFalse('o EXEC tem de abortar', LTx.TryCommit(LRespostas));
+      TAssert.AssertEquals(0, Length(LRespostas));
+    finally
+      LTx.Free;
+    end;
+
+    // O valor do intruso sobreviveu: a transacao nao gravou nada.
+    TAssert.AssertEquals('999', LClient.Strings.GetString(Chave('tx:saldo')));
+
+    LimpaChaves(LClient, ['tx:saldo']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisTransactionIntegrationTests.Watch_NaoAbortaQuandoNinguemMexe;
+var
+  LClient: TRedisClient;
+  LTx: TRedisTransaction;
+  LRespostas: TRedisReplyArray;
+  LSaldo: Int64;
+begin
+  LClient := NovoCliente;
+  try
+    LClient.Strings.SetValue(Chave('tx:saldo'), '500');
+
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Watch([Chave('tx:saldo')]);
+      LSaldo := LTx.Connection.Execute('GET', [Chave('tx:saldo')]).AsInteger;
+      LTx.Queue('SET', [Chave('tx:saldo'), LSaldo - 100]);
+      TAssert.AssertTrue('sem interferencia, commita',
+        LTx.TryCommit(LRespostas));
+      TAssert.AssertEquals(1, Length(LRespostas));
+    finally
+      LTx.Free;
+    end;
+
+    TAssert.AssertEquals('400', LClient.Strings.GetString(Chave('tx:saldo')));
+
+    LimpaChaves(LClient, ['tx:saldo']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisTransactionIntegrationTests.ErroNoMeioDoBloco_NaoDesfazOsOutros;
+var
+  LClient: TRedisClient;
+  LTx: TRedisTransaction;
+  LRespostas: TRedisReplyArray;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['tx:a', 'tx:b', 'tx:str']);
+    LClient.Strings.SetValue(Chave('tx:str'), 'texto');
+
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Queue('SET', [Chave('tx:a'), '1']);
+      LTx.Queue('LPUSH', [Chave('tx:str'), 'x']);   // WRONGTYPE na execucao
+      LTx.Queue('SET', [Chave('tx:b'), '2']);
+      LRespostas := LTx.Commit;
+    finally
+      LTx.Free;
+    end;
+
+    TAssert.AssertEquals(3, Length(LRespostas));
+    TAssert.AssertTrue('o do meio falhou', LRespostas[1].IsError);
+    TAssert.AssertEquals('WRONGTYPE', LRespostas[1].ErrorCode);
+
+    // **Nao existe rollback no Redis.** Os outros dois comandos rodaram e
+    // ficaram gravados. Quem precisa de tudo-ou-nada de verdade usa um script
+    // Lua, nao MULTI/EXEC.
+    TAssert.AssertEquals('1', LClient.Strings.GetString(Chave('tx:a')));
+    TAssert.AssertEquals('2', LClient.Strings.GetString(Chave('tx:b')));
+
+    LimpaChaves(LClient, ['tx:a', 'tx:b', 'tx:str']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisTransactionIntegrationTests.Transacao_DevolveAConexaoAoPool;
+var
+  LClient: TRedisClient;
+  LTx: TRedisTransaction;
+begin
+  LClient := NovoCliente;
+  try
+    LClient.Ping;   // forca o pool a abrir a primeira conexao
+    LTx := LClient.BeginTransaction;
+    try
+      // Enquanto a transacao vive, a conexao esta' FORA de circulacao: e' o
+      // preco da afinidade de conexao que o MULTI exige.
+      TAssert.AssertEquals(1, LClient.Pool.InUseCount);
+      LTx.Queue('PING');
+      LTx.Commit;
+    finally
+      LTx.Free;
+    end;
+    // E o destrutor devolve. Sem isso, cada transacao vazaria uma conexao do
+    // pool ate' o MaxSize estourar.
+    TAssert.AssertEquals(0, LClient.Pool.InUseCount);
+    TAssert.AssertEquals(1, LClient.Pool.IdleCount);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisTransactionIntegrationTests.WatchPendente_NaoContaminaAProximaTransacao;
+var
+  LParams: TRedisParams;
+  LPoolParams: TRedisPoolParams;
+  LClient: TRedisClient;
+  LTx: TRedisTransaction;
+  LIntruso: TRedisConnection;
+  LRespostas: TRedisReplyArray;
+begin
+  // MaxSize = 1 obriga o pool a reusar a MESMA conexao — que e' o que torna a
+  // contaminacao observavel.
+  LParams := ParamsDeTeste;
+  LPoolParams := RedisDefaultPoolParams;
+  LPoolParams.MaxSize := 1;
+  LClient := TRedisClient.Create(LParams, LPoolParams);
+  try
+    LimpaChaves(LClient, ['tx:vigiada', 'tx:destino']);
+
+    // Primeira transacao: vigia e desiste SEM commitar.
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Watch([Chave('tx:vigiada')]);
+    finally
+      LTx.Free;   // o destrutor tem de mandar UNWATCH
+    end;
+
+    // Alguem mexe na chave que a transacao ABANDONADA vigiava.
+    LIntruso := AbreConexao;
+    try
+      LIntruso.Execute('SET', [Chave('tx:vigiada'), 'mudou']);
+    finally
+      LIntruso.Free;
+    end;
+
+    // Segunda transacao, pela MESMA conexao, sem watch nenhum. Se o UNWATCH
+    // nao tivesse saido, este EXEC abortaria por causa de uma chave que esta
+    // transacao nunca vigiou — e quem escreveu este codigo nao teria como
+    // descobrir por que.
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Queue('SET', [Chave('tx:destino'), 'ok']);
+      TAssert.AssertTrue('watch abandonado nao pode abortar isto',
+        LTx.TryCommit(LRespostas));
+    finally
+      LTx.Free;
+    end;
+    TAssert.AssertEquals('ok', LClient.Strings.GetString(Chave('tx:destino')));
+
+    LimpaChaves(LClient, ['tx:vigiada', 'tx:destino']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+{ TRedisScriptingIntegrationTests }
+
+procedure TRedisScriptingIntegrationTests.Eval_ExecutaLuaEConverteOsTipos;
+var
+  LClient: TRedisClient;
+  LReply: IRedisReply;
+begin
+  LClient := NovoCliente;
+  try
+    // Inteiro, texto e lista: os tres tipos que o Lua devolve ao RESP.
+    TAssert.AssertEquals(Int64(3),
+      LClient.Scripting.Eval('return 1 + 2', [], []).AsInteger);
+    TAssert.AssertEquals('ola',
+      LClient.Scripting.Eval('return "ola"', [], []).AsString);
+
+    LReply := LClient.Scripting.Eval('return {KEYS[1], ARGV[1]}',
+      ['achave'], ['oarg']);
+    TAssert.AssertEquals(2, LReply.Count);
+    // Separar KEYS de ARGV nao e' burocracia: e' o que diz ao servidor quais
+    // chaves o script toca.
+    TAssert.AssertEquals('achave', LReply[0].AsString);
+    TAssert.AssertEquals('oarg', LReply[1].AsString);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisScriptingIntegrationTests.ScriptLoad_OShaDoServidorBateComOLocal;
+var
+  LClient: TRedisClient;
+  LDoServidor, LLocal: string;
+begin
+  LClient := NovoCliente;
+  try
+    LDoServidor := LClient.Scripting.ScriptLoad(SCRIPT_LIBERA_LOCK);
+    LLocal := RedisScriptSha(SCRIPT_LIBERA_LOCK);
+    // E' a premissa do cache inteiro: se o SHA calculado aqui nao fosse o
+    // mesmo que o servidor calcula, todo EVALSHA responderia NOSCRIPT e o
+    // cache trabalharia sem nunca acertar.
+    TAssert.AssertEquals(LDoServidor, LLocal);
+    TAssert.AssertTrue('o servidor conhece o sha',
+      LClient.Scripting.ScriptExists(LLocal));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisScriptingIntegrationTests.Run_SegundaChamadaUsaOCache;
+var
+  LClient: TRedisClient;
+begin
+  LClient := NovoCliente;
+  try
+    TAssert.AssertEquals(0, LClient.Scripting.CachedCount);
+    TAssert.AssertEquals(Int64(7),
+      LClient.Scripting.Run('return 7', [], []).AsInteger);
+    TAssert.AssertEquals(1, LClient.Scripting.CachedCount);
+    // A segunda vai por EVALSHA — o resultado tem de ser o mesmo, e e' isso
+    // que o teste garante de fora.
+    TAssert.AssertEquals(Int64(7),
+      LClient.Scripting.Run('return 7', [], []).AsInteger);
+    TAssert.AssertEquals(1, LClient.Scripting.CachedCount);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisScriptingIntegrationTests.Run_AposScriptFlush_SeRecuperaSozinho;
+var
+  LClient, LOutro: TRedisClient;
+begin
+  LClient := NovoCliente;
+  LOutro := NovoCliente;
+  try
+    LClient.Scripting.Run('return 42', [], []);
+    TAssert.AssertEquals(1, LClient.Scripting.CachedCount);
+
+    // Outro cliente esvazia o cache DO SERVIDOR. O nosso continua achando que
+    // o script esta' la' — e' exatamente o estado que produz NOSCRIPT.
+    LOutro.Execute('SCRIPT', ['FLUSH']);
+    TAssert.AssertEquals(1, LClient.Scripting.CachedCount);
+
+    // Nenhum erro chega a quem chamou: a lib reensina o script sozinha. E' o
+    // que torna o cache uma otimizacao que se autocorrige, e nao uma suposicao
+    // sobre o estado do servidor (que um failover para replica tambem quebra).
+    TAssert.AssertEquals(Int64(42),
+      LClient.Scripting.Run('return 42', [], []).AsInteger);
+  finally
+    LOutro.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisScriptingIntegrationTests.LockDistribuido_SoQuemTemOTokenLibera;
+var
+  LClient: TRedisClient;
+  LOpc: TRedisSetOptions;
+begin
+  LClient := NovoCliente;
+  try
+    LimpaChaves(LClient, ['tx:lock']);
+
+    LOpc := RedisDefaultSetOptions;
+    LOpc.Condition := scNotExists;
+    LOpc.Expiry := seSeconds;
+    LOpc.ExpiryValue := 30;
+    TAssert.AssertFalse('tomou o lock',
+      LClient.Strings.SetWithOptions(Chave('tx:lock'), 'token-A', LOpc).IsNull);
+
+    // Token errado nao libera nada. Sem o script, um GET seguido de DEL faria
+    // o portador do token B apagar o lock do token A no intervalo entre os
+    // dois comandos — o erro classico de lock distribuido.
+    TAssert.AssertEquals(Int64(0), LClient.Scripting.Run(
+      SCRIPT_LIBERA_LOCK, [Chave('tx:lock')], ['token-B']).AsInteger);
+    TAssert.AssertEquals('token-A',
+      LClient.Strings.GetString(Chave('tx:lock')));
+
+    // O dono libera.
+    TAssert.AssertEquals(Int64(1), LClient.Scripting.Run(
+      SCRIPT_LIBERA_LOCK, [Chave('tx:lock')], ['token-A']).AsInteger);
+    TAssert.AssertFalse('o lock sumiu', LClient.Keys.Exists(Chave('tx:lock')));
+  finally
+    LClient.Free;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TRedisConnectionIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisPoolIntegrationTests);
@@ -1461,5 +1849,7 @@ initialization
   TDUnitX.RegisterTestFixture(TRedisListsIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisSetsIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisZSetsIntegrationTests);
+  TDUnitX.RegisterTestFixture(TRedisTransactionIntegrationTests);
+  TDUnitX.RegisterTestFixture(TRedisScriptingIntegrationTests);
 
 end.

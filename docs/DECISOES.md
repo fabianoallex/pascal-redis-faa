@@ -614,6 +614,92 @@ Duas consequências:
   `SysWOW64`). Os dois passaram — mas se um deles tivesse falhado, sem o `Info`
   a investigação começaria pelo lugar errado.
 
+## 34. `MULTI`/`EXEC` não é rollback, e a lib não finge que é (M6)
+
+A palavra "transação" carrega uma promessa que o Redis não faz. O que o
+`MULTI`/`EXEC` garante é **isolamento**: nenhum outro cliente intercala comando
+no meio do bloco. O que ele **não** faz:
+
+- **Não desfaz nada.** Se o terceiro de cinco comandos falhar com `WRONGTYPE`,
+  os outros quatro rodaram e ficaram gravados. Não há atomicidade no sentido do
+  "A" de ACID.
+- **Não deixa ler lá dentro.** Entre `MULTI` e `EXEC` os comandos só são
+  enfileirados; nenhum devolve valor. Não dá para ler um saldo e decidir o que
+  gravar dentro do bloco.
+
+A tentação seria esconder isso: fazer o `Commit` levantar quando qualquer item
+falha, para parecer uma transação de banco. Seria pior do que inútil — o
+chamador concluiria que nada foi gravado, quando na verdade quase tudo foi.
+Então `Commit` **não levanta** por erro de execução: devolve o array e o item
+que falhou vem como `rkError`, exatamente como no pipeline. Quem precisa de
+tudo-ou-nada de verdade usa um script Lua (decisão 36), que o servidor executa
+como uma unidade.
+
+O que `Commit` **levanta** é outra coisa: comando que o servidor se recusou a
+*enfileirar* (inexistente, aridade errada). Aí o `EXEC` inteiro aborta com
+`EXECABORT` e nada rodou — e a exceção cita **qual** comando estava torto, que é
+a informação que o `EXECABORT` sozinho não dá.
+
+## 35. O bloco inteiro sai num pipeline só (M6)
+
+A implementação ingênua manda `MULTI`, espera `+OK`, manda cada comando,
+espera `+QUEUED` de cada um, e só então manda `EXEC`: doze idas e voltas para
+dez comandos. Aqui os comandos são acumulados **localmente** e o bloco sai numa
+escrita só — uma ida e volta, reusando o `TRedisPipeline` do M2, que já sabe
+escrever N comandos e ler N respostas.
+
+Três consequências que aparecem na API:
+
+1. **`Discard` quase nunca vai ao fio.** Se o commit não aconteceu, o `MULTI`
+   também não saiu, e não há o que descartar no servidor. O que o `Discard`
+   *precisa* mandar é o `UNWATCH`.
+2. **Enfileirar não valida nada.** Um comando inexistente só é recusado quando o
+   lote chega ao servidor. Em troca, `Queue` nunca bloqueia e nunca falha.
+3. **Bloco vazio VAI ao servidor** — ao contrário do pipeline vazio, que o M2
+   decidiu não enviar. Sob `WATCH`, um `MULTI`/`EXEC` sem comando nenhum é a
+   pergunta legítima "alguém mexeu no que eu vigiava?", e a resposta só existe
+   do outro lado.
+
+E uma que aparece no destrutor: **`WATCH` é estado da conexão**, não do bloco.
+Uma conexão devolvida ao pool com `WATCH` pendente faria o `EXEC` do *próximo*
+usuário abortar sem motivo aparente — e ele não teria como descobrir por quê. É
+a mesma família do bug de conexão suja da decisão 18, e a resposta é a mesma:
+limpar antes de devolver. Por isso o destrutor da transação manda `UNWATCH`
+quando havia vigilância e não houve commit, engolindo falha (a conexão pode já
+estar morta, e o pool vai destruí-la de qualquer forma).
+
+É também a razão de a transação segurar uma **conexão inteira** enquanto vive: o
+`WATCH` não sobrevive a uma troca de conexão, e sem afinidade o check-and-set
+não existiria. `TRedisClient.BeginTransaction` empresta do pool e devolve no
+destrutor — daí o `try/finally` não ser opcional.
+
+## 36. O SHA do script é calculado aqui, sobre bytes, e o cache se autocorrige (M6)
+
+`EVALSHA` troca kilobytes de Lua por 40 bytes. Para usá-lo é preciso saber o
+SHA-1 do script, e há dois jeitos: perguntar ao servidor (`SCRIPT LOAD`) ou
+calcular. A lib **calcula**, e isso muda o custo do primeiro uso: sem cálculo
+local, aquecer um script custaria um round-trip a mais; com ele, a primeira
+chamada é um `EVAL` normal — o servidor executa **e** guarda de uma vez.
+
+Duas escolhas dentro dessa:
+
+- **O digest é dos BYTES UTF-8, não da `string`.** No FPC a `string` carrega
+  codepage dinâmico; hashear a representação local daria um SHA diferente do que
+  o servidor calcula assim que houvesse um acento no script (num comentário Lua,
+  por exemplo). O sintoma seria cruel: `EVALSHA` respondendo `NOSCRIPT` para
+  sempre, com o cache "funcionando" e nunca acertando. Há um teste unitário com
+  vetor de referência calculado fora da lib exatamente para travar isso.
+- **`NOSCRIPT` não é erro, é recado.** O cache do servidor pode sumir por
+  `SCRIPT FLUSH`, restart ou failover para uma réplica que nunca viu o script.
+  Quando isso acontece, `Run` reenvia o `EVAL` sozinha e quem chamou não vê erro
+  nenhum. É o que torna o cache uma otimização que **se autocorrige**, e não uma
+  suposição sobre o estado do servidor. Qualquer outro erro — inclusive erro do
+  próprio Lua — sobe: reenviar só repetiria a falha e dobraria o tráfego.
+
+O cache vive no **cliente**, não na conexão: todas as conexões do pool falam com
+o mesmo servidor, e o cache de scripts é dele. Por isso é protegido por lock —
+várias threads podem estar estreando o mesmo script ao mesmo tempo.
+
 ---
 
 ## Compatibilidade e nomenclatura

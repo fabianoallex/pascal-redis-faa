@@ -58,7 +58,9 @@ uses
   Redis.Commands.Hashes,
   Redis.Commands.Lists,
   Redis.Commands.Sets,
-  Redis.Commands.ZSets;
+  Redis.Commands.ZSets,
+  Redis.Commands.Scripting,
+  Redis.Transaction;
 
 const
   /// Folga somada ao timeout de um comando bloqueante para chegar ao read
@@ -90,6 +92,7 @@ type
     FLists: TRedisListsCommands;
     FSets: TRedisSetsCommands;
     FZSets: TRedisZSetsCommands;
+    FScripting: TRedisScriptingCommands;
     procedure CreateFamilies;
     /// Pool dedicado aos comandos bloqueantes, criado na primeira vez que um
     /// deles roda. Fica separado do pool comum de proposito.
@@ -131,6 +134,25 @@ type
     /// morreu.
     function Ping: Boolean;
 
+    /// Abre um bloco MULTI/EXEC sobre uma conexao DEDICADA, tirada do pool e
+    /// devolvida quando a transacao for liberada.
+    ///
+    /// O try/finally nao e' opcional: enquanto a transacao viver, aquela
+    /// conexao esta' fora de circulacao, e esquecer o Free vaza uma conexao do
+    /// pool a cada transacao.
+    ///
+    ///   LTx := LClient.BeginTransaction;
+    ///   try
+    ///     LTx.Watch(['saldo']);
+    ///     ...
+    ///   finally
+    ///     LTx.Free;
+    ///   end;
+    ///
+    /// No modo conexao unica devolve uma transacao sobre a propria conexao do
+    /// cliente, e liberar a transacao nao a fecha.
+    function BeginTransaction: TRedisTransaction;
+
     /// Empresta uma conexao. No modo conexao unica devolve sempre a mesma, e
     /// Release e' no-op — o que deixa o try/finally identico nos dois modos.
     function Acquire: TRedisConnection;
@@ -155,6 +177,8 @@ type
     property Sets: TRedisSetsCommands read FSets;
     /// Comandos de sorted set: ZADD, ZRANGE, ZINCRBY.
     property ZSets: TRedisZSetsCommands read FZSets;
+    /// EVAL/EVALSHA com cache de SHA, e a familia SCRIPT.
+    property Scripting: TRedisScriptingCommands read FScripting;
 
     /// Parametros de conexao em uso.
     property Params: TRedisParams read FParams;
@@ -220,6 +244,7 @@ begin
   FLists.Free;
   FSets.Free;
   FZSets.Free;
+  FScripting.Free;
   FBlockingPool.Free;
   if FOwnsPool then
     FPool.Free;
@@ -239,6 +264,22 @@ begin
   FLists := TRedisListsCommands.Create(Self);
   FSets := TRedisSetsCommands.Create(Self);
   FZSets := TRedisZSetsCommands.Create(Self);
+  FScripting := TRedisScriptingCommands.Create(Self);
+end;
+
+function TRedisClient.BeginTransaction: TRedisTransaction;
+var
+  LConn: TRedisConnection;
+begin
+  LConn := Acquire;
+  try
+    // Release como retorno de chamada: no modo pool devolve a conexao, no modo
+    // conexao unica e' no-op. A transacao nao precisa saber a diferenca.
+    Result := TRedisTransaction.Create(LConn, Release);
+  except
+    Release(LConn);
+    raise;
+  end;
 end;
 
 function TRedisClient.Acquire: TRedisConnection;

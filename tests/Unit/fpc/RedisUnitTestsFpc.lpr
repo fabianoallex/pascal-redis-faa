@@ -24,7 +24,8 @@ uses
   Redis.RespTests,
   Redis.ConnectionTests,
   Redis.PoolTests,
-  Redis.CommandsTests;
+  Redis.CommandsTests,
+  Redis.TransactionTests;
 
 var
   ConsoleApp: TTestRunner;

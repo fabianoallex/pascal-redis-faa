@@ -3,12 +3,12 @@
 Cliente **Redis** (protocolo RESP2/RESP3) para **Free Pascal/Lazarus e Delphi**, numa
 única codebase, escrito do zero. Licença MIT.
 
-> **Status: em construção (M5 — TLS).** Já dá para conectar, autenticar, executar
-> **qualquer** comando do Redis, usar pipeline, trabalhar com um pool de conexões com
-> timeout de verdade, chamar os comandos de Keys, Strings, Hashes, Lists, Sets e ZSets
-> pela fachada tipada — inclusive os bloqueantes — em RESP2 ou RESP3, e cifrar tudo isso
-> com TLS. Ainda faltam transações e scripting (M6), pub/sub (M7) e streams (M8). O
-> roadmap completo está em `CLAUDE.md`.
+> **Status: em construção (M6 — transações e scripting).** Já dá para conectar,
+> autenticar, executar **qualquer** comando do Redis, usar pipeline, trabalhar com um pool
+> de conexões com timeout de verdade, chamar os comandos de Keys, Strings, Hashes, Lists,
+> Sets e ZSets pela fachada tipada — inclusive os bloqueantes — em RESP2 ou RESP3, cifrar
+> tudo isso com TLS, e usar `MULTI`/`EXEC`/`WATCH` e scripts Lua com cache de SHA. Ainda
+> faltam pub/sub (M7) e streams (M8). O roadmap completo está em `CLAUDE.md`.
 
 Projeto irmão da [`pascal-amqp-faa`](../pascal-amqp-faa) (cliente AMQP 0-9-1) e da
 `pascal-pipes-faa` (IPC), com as mesmas regras: codebase dual FPC 3.2.2 + Delphi 12,
@@ -311,6 +311,73 @@ por cima da criptografia, que é onde um envelope TLS mal-feito aparece — bulk
 atravessando vários registros TLS, pipeline numa escrita só, timeout de socket no meio de
 um registro.
 
+### Transações (`MULTI`/`EXEC`/`WATCH`)
+
+A palavra engana: uma transação do Redis garante que **ninguém intercala comando no meio
+do bloco** — e só isso. Ela não desfaz nada quando um comando falha, e não deixa ler nada
+lá dentro. É esse segundo buraco que o `WATCH` preenche, por fora do bloco:
+
+```pascal
+LTx := LClient.BeginTransaction;      // empresta uma conexão do pool
+try
+  LTx.Watch(['saldo']);                                            // vigia
+  LSaldo := LTx.Connection.Execute('GET', ['saldo']).AsInteger;    // lê (fora do bloco)
+  if LSaldo < 100 then
+    Exit;                                                          // decide
+  LTx.Queue('SET', ['saldo', LSaldo - 100]);                       // enfileira
+  if not LTx.TryCommit(LRespostas) then
+    ; // alguém mexeu em 'saldo' entre o WATCH e o EXEC: recomece o ciclo
+finally
+  LTx.Free;                            // devolve a conexão ao pool
+end;
+```
+
+`TryCommit` devolvendo **False não é erro** — é o funcionamento normal do check-and-set sob
+concorrência, e a resposta certa quase sempre é repetir o ciclo. (`Commit` existe para
+quando não há `WATCH`: ele levanta `ERedisTransactionAborted` no lugar.)
+
+**Não há rollback.** Se um comando do bloco falhar com `WRONGTYPE`, os outros rodaram e
+ficaram gravados; o erro vem como item `rkError` no array de respostas e `Commit` **não**
+levanta por isso. Levantar faria você concluir que nada foi gravado, quando quase tudo foi.
+Para tudo-ou-nada de verdade, use um script Lua.
+
+O bloco inteiro sai numa **única ida e volta** (`MULTI` + comandos + `EXEC` num pipeline),
+e não N+2. Como o `MULTI` só sai no commit, `Discard` nem precisa falar com o servidor — o
+que ele manda é o `UNWATCH`. E o `try/finally` não é decoração: enquanto a transação viver,
+aquela conexão está fora de circulação, porque `WATCH` é estado **da conexão**.
+
+### Scripting (`EVAL`/`EVALSHA`)
+
+Um script Lua é a única atomicidade real do Redis: ele lê, decide e escreve numa passagem
+só, e nada mais roda no servidor enquanto isso — com a contrapartida óbvia de que **script
+demorado trava o servidor inteiro**.
+
+O exemplo que não existe sem script é o release de lock distribuído:
+
+```pascal
+const
+  LIBERA =
+    'if redis.call("GET", KEYS[1]) == ARGV[1] then' + sLineBreak +
+    '  return redis.call("DEL", KEYS[1])' + sLineBreak +
+    'else' + sLineBreak +
+    '  return 0' + sLineBreak +
+    'end';
+
+// 1 quando o lock era seu e foi liberado; 0 quando já era de outra pessoa.
+LClient.Scripting.Run(LIBERA, ['lock:pedido:7'], [LMeuToken]).AsInteger;
+```
+
+Fazer isso com `GET` seguido de `DEL` é a corrida clássica: entre os dois, o lock pode
+expirar e ser tomado por outro — e o `DEL` apagaria o lock **dele**.
+
+`Run` cuida do cache de SHA sozinha: calcula o SHA-1 localmente (sem round-trip), manda
+`EVAL` na estreia — o servidor executa **e** guarda — e `EVALSHA` da segunda em diante,
+trocando kilobytes de Lua por 40 bytes. Se o servidor tiver esquecido o script
+(`SCRIPT FLUSH`, restart, failover para uma réplica), ele responde `NOSCRIPT` e a lib
+reenvia o `EVAL` sozinha: o cache é uma otimização que **se autocorrige**, nunca uma
+suposição sobre o estado do servidor. `Eval`, `EvalSha`, `ScriptLoad`, `ScriptExists` e
+`ScriptFlush` continuam disponíveis para quem quiser controlar o ciclo à mão.
+
 ## Build
 
 **FPC (linha de comando):**
@@ -336,7 +403,9 @@ invalidação) sobe sobre um servidor falso, também em memória. A lógica do p
 esse mesmo servidor falso. As fachadas por família são verificadas nas duas metades que
 importam: os bytes que foram para o fio (a ordem dos modificadores de `SET`, `ZADD` e
 `ZRANGEBYSCORE` não é livre) e a conversão da resposta (nulo que não pode virar `''`,
-`WITHSCORES` mudando de forma entre RESP2 e RESP3).
+`WITHSCORES` mudando de forma entre RESP2 e RESP3). As transações e o scripting entram
+aqui também: o `EXEC` nulo, o comando recusado na fila e o `NOSCRIPT` são estados que o
+servidor real quase nunca produz sob demanda, mas que o servidor falso entrega de graça.
 
 **FPC/Lazarus (FPCUnit):**
 
@@ -380,8 +449,8 @@ Precisa do container de pé (seção anterior).
 ```
 cd samples\SmokeTest
 lazbuild SmokeTest.lpi
-SmokeTest.exe          # 90 passos, texto claro (6379)
-SmokeTest.exe --tls    # 99 passos, tudo cifrado (6380) + a seção de TLS
+SmokeTest.exe          # 108 passos, texto claro (6379)
+SmokeTest.exe --tls    # 117 passos, tudo cifrado (6380) + a seção de TLS
 ```
 
 Sai com código 0 se todos os passos passarem, e 2 se receber um argumento

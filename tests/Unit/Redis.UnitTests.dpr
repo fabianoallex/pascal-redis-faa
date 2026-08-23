@@ -28,13 +28,16 @@ uses
   Redis.Commands.Lists in '..\..\src\Redis.Commands.Lists.pas',
   Redis.Commands.Sets in '..\..\src\Redis.Commands.Sets.pas',
   Redis.Commands.ZSets in '..\..\src\Redis.Commands.ZSets.pas',
+  Redis.Commands.Scripting in '..\..\src\Redis.Commands.Scripting.pas',
+  Redis.Transaction in '..\..\src\Redis.Transaction.pas',
   Redis.Client in '..\..\src\Redis.Client.pas',
   Redis.DUnitXCompat in 'Redis.DUnitXCompat.pas',
   Redis.TypesTests in 'Redis.TypesTests.pas',
   Redis.RespTests in 'Redis.RespTests.pas',
   Redis.ConnectionTests in 'Redis.ConnectionTests.pas',
   Redis.PoolTests in 'Redis.PoolTests.pas',
-  Redis.CommandsTests in 'Redis.CommandsTests.pas';
+  Redis.CommandsTests in 'Redis.CommandsTests.pas',
+  Redis.TransactionTests in 'Redis.TransactionTests.pas';
 
 var
   runner: ITestRunner;

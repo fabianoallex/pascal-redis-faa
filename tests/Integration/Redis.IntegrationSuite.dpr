@@ -35,6 +35,8 @@ uses
   Redis.Commands.Lists in '..\..\src\Redis.Commands.Lists.pas',
   Redis.Commands.Sets in '..\..\src\Redis.Commands.Sets.pas',
   Redis.Commands.ZSets in '..\..\src\Redis.Commands.ZSets.pas',
+  Redis.Commands.Scripting in '..\..\src\Redis.Commands.Scripting.pas',
+  Redis.Transaction in '..\..\src\Redis.Transaction.pas',
   Redis.Client in '..\..\src\Redis.Client.pas',
   Redis.DUnitXCompat in '..\Unit\Redis.DUnitXCompat.pas',
   Redis.IntegrationTests in 'Redis.IntegrationTests.pas';

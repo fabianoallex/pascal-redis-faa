@@ -6,12 +6,13 @@
     FPC:    fpc -Fu..\..\src -Fi..\..\src SmokeTest.dpr
     Delphi: dcc32 -NSSystem;Winapi -U..\..\src -I..\..\src SmokeTest.dpr
 
-  ESTADO (M5): conexao, pool, timeouts, fachadas por familia e TLS. Este
-  programa exercita tudo de ponta a ponta — handshake, Execute generico,
-  pipeline, erro de servidor, binario, RESP2 x RESP3, read timeout, pool,
-  invalidacao de conexao e os comandos de chaves, strings, hashes, listas,
-  conjuntos e sorted sets, inclusive um bloqueante. O que ainda nao existe:
-  MULTI/EXEC e EVAL (M6), pub/sub (M7), streams (M8).
+  ESTADO (M6): conexao, pool, timeouts, fachadas por familia, TLS,
+  MULTI/EXEC/WATCH e scripting Lua. Este programa exercita tudo de ponta a
+  ponta — handshake, Execute generico, pipeline, erro de servidor, binario,
+  RESP2 x RESP3, read timeout, pool, invalidacao de conexao, os comandos de
+  chaves, strings, hashes, listas, conjuntos e sorted sets (inclusive um
+  bloqueante), transacoes com check-and-set e EVAL/EVALSHA com cache de SHA.
+  O que ainda nao existe: pub/sub (M7), streams (M8).
 
   COM --tls, o programa INTEIRO roda contra o listener cifrado (6380) em vez do
   de texto claro, e ganha uma secao dedicada ao TLS. Nao e' um modo separado com
@@ -56,6 +57,8 @@ uses
   Redis.Commands.Lists,
   Redis.Commands.Sets,
   Redis.Commands.ZSets,
+  Redis.Commands.Scripting,
+  Redis.Transaction,
   Redis.Client;
 
 const
@@ -902,6 +905,159 @@ begin
   end;
 end;
 
+{ ---------------------------------------------------------------------------
+  Transacoes e scripting (M6). Os dois jeitos de o Redis fazer varias coisas
+  sem alguem se meter no meio — e eles nao sao equivalentes: o MULTI/EXEC nao
+  le nada la dentro e nao desfaz nada quando um comando falha; o script Lua le,
+  decide e escreve numa passagem so.
+  --------------------------------------------------------------------------- }
+procedure ExercitaTransacoes;
+const
+  { O release de lock que nao existe sem script: comparar o token e apagar tem
+    de ser a mesma operacao. Com GET seguido de DEL, o lock pode expirar entre
+    os dois e ser tomado por outro — e o DEL apagaria o lock DELE. }
+  LIBERA_LOCK =
+    'if redis.call("GET", KEYS[1]) == ARGV[1] then' + #10 +
+    '  return redis.call("DEL", KEYS[1])' + #10 +
+    'else' + #10 +
+    '  return 0' + #10 +
+    'end';
+var
+  LClient: TRedisClient;
+  LTx: TRedisTransaction;
+  LRespostas: TRedisReplyArray;
+  LIntruso: TRedisConnection;
+  LSaldo: Int64;
+  LSha: string;
+begin
+  Secao('transacoes e scripting');
+  LClient := TRedisClient.Create(Params);
+  try
+    LClient.Keys.DelMany([Chave('tx:n'), Chave('tx:saldo'), Chave('tx:a'),
+      Chave('tx:b'), Chave('tx:str'), Chave('tx:lock')]);
+
+    { bloco simples }
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Queue('INCR', [Chave('tx:n')]);
+      LTx.Queue('INCRBY', [Chave('tx:n'), 10]);
+      LRespostas := LTx.Commit;
+      Passo('MULTI/EXEC devolve uma resposta por comando',
+        (Length(LRespostas) = 2) and (LRespostas[1].AsInteger = 11));
+    finally
+      LTx.Free;
+    end;
+    Passo('e a conexao volta para o pool', LClient.Pool.InUseCount = 0);
+
+    { check-and-set: WATCH abortando }
+    LClient.Strings.SetValue(Chave('tx:saldo'), '500');
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Watch([Chave('tx:saldo')]);
+      // A leitura acontece FORA do bloco: dentro dele nao ha leitura, e e por
+      // isso que o WATCH existe.
+      LSaldo := LTx.Connection.Execute('GET', [Chave('tx:saldo')]).AsInteger;
+      LIntruso := TRedisConnection.Create(Params);
+      try
+        LIntruso.Open;
+        LIntruso.Execute('SET', [Chave('tx:saldo'), '999']);
+      finally
+        LIntruso.Free;
+      end;
+      LTx.Queue('SET', [Chave('tx:saldo'), LSaldo - 100]);
+      Passo('WATCH aborta quando outra conexao mexe na chave',
+        not LTx.TryCommit(LRespostas));
+    finally
+      LTx.Free;
+    end;
+    Passo('e o valor do intruso sobrevive intacto',
+      LClient.Strings.GetString(Chave('tx:saldo')) = '999');
+
+    { check-and-set: sem interferencia }
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Watch([Chave('tx:saldo')]);
+      LSaldo := LTx.Connection.Execute('GET', [Chave('tx:saldo')]).AsInteger;
+      LTx.Queue('SET', [Chave('tx:saldo'), LSaldo - 99]);
+      Passo('sem interferencia, o mesmo ciclo commita',
+        LTx.TryCommit(LRespostas));
+    finally
+      LTx.Free;
+    end;
+    Passo('e o valor novo esta la',
+      LClient.Strings.GetString(Chave('tx:saldo')) = '900');
+
+    { sem rollback }
+    LClient.Strings.SetValue(Chave('tx:str'), 'texto');
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Queue('SET', [Chave('tx:a'), '1']);
+      LTx.Queue('LPUSH', [Chave('tx:str'), 'x']);   // WRONGTYPE
+      LTx.Queue('SET', [Chave('tx:b'), '2']);
+      LRespostas := LTx.Commit;
+      Passo('erro de execucao vem como item, sem levantar',
+        (Length(LRespostas) = 3) and LRespostas[1].IsError,
+        ' -> ' + LRespostas[1].ErrorCode);
+    finally
+      LTx.Free;
+    end;
+    // A palavra "transacao" engana: o Redis nao desfaz nada.
+    Passo('e NAO ha rollback: os outros comandos ficaram gravados',
+      (LClient.Strings.GetString(Chave('tx:a')) = '1') and
+      (LClient.Strings.GetString(Chave('tx:b')) = '2'));
+
+    { Discard }
+    LTx := LClient.BeginTransaction;
+    try
+      LTx.Queue('SET', [Chave('tx:a'), 'nao deve gravar']);
+      LTx.Discard;
+    finally
+      LTx.Free;
+    end;
+    Passo('Discard joga o bloco fora sem mandar nada ao servidor',
+      LClient.Strings.GetString(Chave('tx:a')) = '1');
+
+    { scripting }
+    Passo('EVAL soma no servidor',
+      LClient.Scripting.Eval('return 1 + 2', [], []).AsInteger = 3);
+    Passo('KEYS e ARGV chegam separados ao script',
+      LClient.Scripting.Eval('return {KEYS[1], ARGV[1]}',
+        ['k'], ['a'])[1].AsString = 'a');
+
+    LSha := RedisScriptSha(LIBERA_LOCK);
+    Passo('o SHA calculado aqui e o mesmo que o servidor devolve',
+      LClient.Scripting.ScriptLoad(LIBERA_LOCK) = LSha, ' -> ' + LSha);
+
+    LClient.Scripting.ClearCache;
+    LClient.Scripting.Run('return 7', [], []);
+    Passo('Run memoriza o script na primeira chamada',
+      LClient.Scripting.CachedCount = 1);
+    Passo('e a segunda chamada, por EVALSHA, da o mesmo resultado',
+      LClient.Scripting.Run('return 7', [], []).AsInteger = 7);
+
+    // Cache do servidor esvaziado por fora: o EVALSHA seguinte responde
+    // NOSCRIPT e a lib reenvia o EVAL sozinha.
+    LClient.Execute('SCRIPT', ['FLUSH']);
+    Passo('apos um SCRIPT FLUSH externo, Run se recupera sozinho',
+      LClient.Scripting.Run('return 7', [], []).AsInteger = 7);
+
+    { lock distribuido }
+    LClient.Strings.SetValue(Chave('tx:lock'), 'token-A');
+    Passo('token errado nao libera o lock alheio',
+      LClient.Scripting.Run(LIBERA_LOCK, [Chave('tx:lock')],
+        ['token-B']).AsInteger = 0);
+    Passo('e o dono do token libera',
+      LClient.Scripting.Run(LIBERA_LOCK, [Chave('tx:lock')],
+        ['token-A']).AsInteger = 1);
+    Passo('o lock sumiu', not LClient.Keys.Exists(Chave('tx:lock')));
+
+    LClient.Keys.DelMany([Chave('tx:n'), Chave('tx:saldo'), Chave('tx:a'),
+      Chave('tx:b'), Chave('tx:str')]);
+  finally
+    LClient.Free;
+  end;
+end;
+
 procedure Limpa(AConn: TRedisConnection);
 var
   LPipe: TRedisPipeline;
@@ -933,7 +1089,7 @@ begin
     LTextoTls := ' (nao exercitado; rode com --tls)';
   end;
 
-  WriteLn('pascal-redis-faa :: smoke test M5');
+  WriteLn('pascal-redis-faa :: smoke test M6');
   WriteLn('  alvo ......... ', HOST, ':', Params.Port, LTextoModo);
   WriteLn('  compilador ... ', {$IFDEF FPC} 'FPC ' + {$I %FPCVERSION%} {$ELSE} 'Delphi' {$ENDIF});
   WriteLn('  backend TLS .. ', RedisTlsBackendName, LTextoTls);
@@ -963,6 +1119,7 @@ begin
   ExercitaTimeout;
   ExercitaPool;
   ExercitaFamilias;
+  ExercitaTransacoes;
   ExercitaInvalidacao;
 end;
 

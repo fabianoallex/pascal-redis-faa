@@ -120,7 +120,9 @@ type
     function ExecScan(const AName: string; const AArgs: array of TRedisArg;
       var ACursor: Int64): TRedisStringArray;
   public
-    constructor Create(AExecutor: TRedisCommandExecutor);
+    /// Virtual porque ha' familia com estado proprio: a de scripting mantem um
+    /// cache de SHA e precisa criar lock e lista no construtor.
+    constructor Create(AExecutor: TRedisCommandExecutor); virtual;
 
     /// Quem executa os comandos desta familia.
     property Executor: TRedisCommandExecutor read FExecutor;
