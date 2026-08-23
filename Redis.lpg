@@ -13,6 +13,11 @@
           <Mode Name="Default"/>
         </BuildModes>
       </Target>
+      <Target FileName="samples\LockDistribuidoVcl\LockDistribuidoVcl.lpi">
+        <BuildModes>
+          <Mode Name="Default"/>
+        </BuildModes>
+      </Target>
       <Target FileName="tests\Unit\fpc\RedisUnitTestsFpc.lpi">
         <BuildModes>
           <Mode Name="Default"/>

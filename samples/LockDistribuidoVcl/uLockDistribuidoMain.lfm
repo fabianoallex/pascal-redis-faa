@@ -1,0 +1,368 @@
+object frmLockDistribuido: TfrmLockDistribuido
+  Left = 0
+  Height = 750
+  Top = 0
+  Width = 780
+  Caption = 'Lock distribuído (instância única) com Redis  -  pascal-redis-faa'
+  ClientHeight = 750
+  ClientWidth = 780
+  Font.Height = -12
+  Font.Name = 'Segoe UI'
+  Position = poScreenCenter
+  OnCloseQuery = FormCloseQuery
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  LCLVersion = '4.0.0.0'
+  object gbConexao: TGroupBox
+    Left = 8
+    Height = 80
+    Top = 8
+    Width = 764
+    Caption = ' Conexão '
+    ClientHeight = 60
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 0
+    object lblHost: TLabel
+      Left = 16
+      Height = 15
+      Top = 15
+      Width = 26
+      Caption = 'Host'
+      ParentColor = False
+    end
+    object lblPorta: TLabel
+      Left = 200
+      Height = 15
+      Top = 15
+      Width = 31
+      Caption = 'Porta'
+      ParentColor = False
+    end
+    object lblSenha: TLabel
+      Left = 306
+      Height = 15
+      Top = 15
+      Width = 36
+      Caption = 'Senha'
+      ParentColor = False
+    end
+    object lblDb: TLabel
+      Left = 468
+      Height = 15
+      Top = 15
+      Width = 17
+      Caption = 'DB'
+      ParentColor = False
+    end
+    object lblStatus: TLabel
+      Left = 16
+      Height = 15
+      Top = 40
+      Width = 70
+      Caption = 'Desconectado.'
+      ParentColor = False
+    end
+    object edtHost: TEdit
+      Left = 50
+      Height = 23
+      Top = 11
+      Width = 140
+      TabOrder = 0
+      Text = 'localhost'
+    end
+    object edtPorta: TEdit
+      Left = 237
+      Height = 23
+      Top = 11
+      Width = 60
+      TabOrder = 1
+      Text = '6379'
+    end
+    object edtSenha: TEdit
+      Left = 348
+      Height = 23
+      Top = 11
+      Width = 110
+      EchoMode = emPassword
+      PasswordChar = '*'
+      TabOrder = 2
+    end
+    object edtDb: TEdit
+      Left = 491
+      Height = 23
+      Top = 11
+      Width = 45
+      TabOrder = 3
+      Text = '0'
+    end
+    object chkTls: TCheckBox
+      Left = 548
+      Height = 19
+      Top = 13
+      Width = 40
+      Caption = 'TLS'
+      OnClick = chkTlsClick
+      TabOrder = 4
+    end
+    object btnConectar: TButton
+      Left = 610
+      Height = 25
+      Top = 9
+      Width = 72
+      Caption = 'Conectar'
+      OnClick = btnConectarClick
+      TabOrder = 5
+    end
+    object btnDesconectar: TButton
+      Left = 688
+      Height = 25
+      Top = 9
+      Width = 72
+      Caption = 'Desconectar'
+      OnClick = btnDesconectarClick
+      TabOrder = 6
+    end
+  end
+  object gbLock: TGroupBox
+    Left = 8
+    Height = 140
+    Top = 94
+    Width = 764
+    Caption = ' Aquisição do lock (SET NX PX) '
+    ClientHeight = 120
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 1
+    object lblAviso: TLabel
+      Left = 16
+      Height = 15
+      Top = 12
+      Width = 730
+      Caption = 'AVISO: lock de INSTANCIA UNICA (um Redis so) -- NAO e Redlock. Dono que cai antes do TTL perde a garantia.'
+      ParentColor = False
+    end
+    object lblRecurso: TLabel
+      Left = 16
+      Height = 15
+      Top = 42
+      Width = 46
+      Caption = 'Recurso'
+      ParentColor = False
+    end
+    object lblTtl: TLabel
+      Left = 228
+      Height = 15
+      Top = 42
+      Width = 47
+      Caption = 'TTL (ms)'
+      ParentColor = False
+    end
+    object lblMeuToken: TLabel
+      Left = 16
+      Height = 15
+      Top = 74
+      Width = 68
+      Caption = 'Meu token: -'
+      ParentColor = False
+    end
+    object lblDono: TLabel
+      Left = 16
+      Height = 15
+      Top = 98
+      Width = 138
+      Caption = 'Dono atual no servidor: -'
+      ParentColor = False
+    end
+    object lblTtlRestante: TLabel
+      Left = 410
+      Height = 15
+      Top = 98
+      Width = 84
+      Caption = 'TTL restante: -'
+      ParentColor = False
+    end
+    object edtRecurso: TEdit
+      Left = 72
+      Height = 23
+      Top = 38
+      Width = 140
+      TabOrder = 0
+      Text = 'pedido:42'
+    end
+    object edtTtl: TEdit
+      Left = 288
+      Height = 23
+      Top = 38
+      Width = 60
+      TabOrder = 1
+      Text = '4000'
+    end
+    object chkComToken: TCheckBox
+      Left = 364
+      Height = 19
+      Top = 40
+      Width = 218
+      Caption = 'Gerar token de posse (recomendado)'
+      Checked = True
+      State = cbChecked
+      OnClick = chkComTokenClick
+      TabOrder = 2
+    end
+    object btnAdquirir: TButton
+      Left = 606
+      Height = 25
+      Top = 37
+      Width = 150
+      Caption = 'Adquirir (SET NX PX)'
+      OnClick = btnAdquirirClick
+      TabOrder = 3
+    end
+  end
+  object gbConcorrente: TGroupBox
+    Left = 8
+    Height = 90
+    Top = 240
+    Width = 764
+    Caption = ' Concorrente simulado (outro processo) '
+    ClientHeight = 70
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 2
+    object lblConcorrenteToken: TLabel
+      Left = 330
+      Height = 15
+      Top = 17
+      Width = 133
+      Caption = 'Token do concorrente: -'
+      ParentColor = False
+    end
+    object lblConcorrenteInfo: TLabel
+      Left = 16
+      Height = 15
+      Top = 45
+      Width = 730
+      Caption = 'Ao ficar livre, o concorrente tenta adquirir a cada 1s, com o proprio token.'
+      ParentColor = False
+    end
+    object chkConcorrente: TCheckBox
+      Left = 16
+      Height = 19
+      Top = 15
+      Width = 232
+      Caption = 'Simular concorrente tentando o lock'
+      OnClick = chkConcorrenteClick
+      TabOrder = 0
+    end
+  end
+  object gbLiberacao: TGroupBox
+    Left = 8
+    Height = 100
+    Top = 336
+    Width = 764
+    Caption = ' Liberação e a armadilha '
+    ClientHeight = 80
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 3
+    object lblArmadilha: TLabel
+      Left = 16
+      Height = 15
+      Top = 52
+      Width = 730
+      Caption = 'DEL apaga o que estiver na chave AGORA, seja seu ou de outro dono. Deixe expirar, ligue o concorrente, e teste aqui.'
+      ParentColor = False
+    end
+    object btnLiberarSeguro: TButton
+      Left = 16
+      Height = 25
+      Top = 15
+      Width = 280
+      Caption = 'Liberar com script (compare-and-delete)'
+      OnClick = btnLiberarSeguroClick
+      TabOrder = 0
+    end
+    object btnLiberarArmadilha: TButton
+      Left = 310
+      Height = 25
+      Top = 15
+      Width = 260
+      Caption = 'Liberar com DEL direto (ARMADILHA)'
+      OnClick = btnLiberarArmadilhaClick
+      TabOrder = 1
+    end
+  end
+  object gbRenovacao: TGroupBox
+    Left = 8
+    Height = 90
+    Top = 442
+    Width = 764
+    Caption = ' Renovação de posse (PEXPIRE via Lua) '
+    ClientHeight = 70
+    ClientWidth = 760
+    ParentBackground = False
+    TabOrder = 4
+    object lblRenovacaoInfo: TLabel
+      Left = 16
+      Height = 15
+      Top = 45
+      Width = 730
+      Caption = 'A cada 1s roda um script que so estende o TTL se o token no servidor ainda for o meu.'
+      ParentColor = False
+    end
+    object chkRenovarAuto: TCheckBox
+      Left = 16
+      Height = 19
+      Top = 15
+      Width = 320
+      Caption = 'Renovar automaticamente enquanto eu for o dono'
+      OnClick = chkRenovarAutoClick
+      TabOrder = 0
+    end
+  end
+  object mmLog: TMemo
+    Left = 8
+    Height = 170
+    Top = 538
+    Width = 764
+    Anchors = [akTop, akLeft, akRight, akBottom]
+    Font.Height = -12
+    Font.Name = 'Consolas'
+    ParentFont = False
+    ReadOnly = True
+    ScrollBars = ssVertical
+    TabOrder = 5
+    WordWrap = False
+  end
+  object btnLimpar: TButton
+    Left = 8
+    Height = 25
+    Top = 716
+    Width = 100
+    Anchors = [akLeft, akBottom]
+    Caption = 'Limpar log'
+    OnClick = btnLimparClick
+    TabOrder = 6
+  end
+  object tmrAmostra: TTimer
+    Enabled = False
+    Interval = 500
+    OnTimer = tmrAmostraTimer
+    Left = 620
+    Top = 680
+  end
+  object tmrConcorrente: TTimer
+    Enabled = False
+    Interval = 1000
+    OnTimer = tmrConcorrenteTimer
+    Left = 660
+    Top = 680
+  end
+  object tmrRenovar: TTimer
+    Enabled = False
+    Interval = 1000
+    OnTimer = tmrRenovarTimer
+    Left = 700
+    Top = 680
+  end
+end

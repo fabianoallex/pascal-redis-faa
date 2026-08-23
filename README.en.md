@@ -709,6 +709,40 @@ their own thread, so **no network work happens on the UI thread**. Every
 operation is a `TRedisWorkItem` on `RedisPool`, and the result comes back to the
 screen through a disposable marshal + `TThread.Queue`.
 
+### `LockDistribuidoVcl`
+
+Distributed lock with `SET NX PX` and an ownership token. **Warning right on
+the screen**: this is a **single-instance** lock (one Redis, no coordination
+across several) — it is not Redlock. If the owning process dies or pauses
+longer than the TTL, the guarantee goes down with it.
+
+```
+cd samples\LockDistribuidoVcl
+lazbuild LockDistribuidoVcl.lpi
+LockDistribuidoVcl.exe
+```
+
+Three things to try on screen:
+
+- **The `DEL` trap.** Acquire the lock with a short TTL, turn on "Simular
+  concorrente tentando o lock" (a simulated competitor that keeps trying
+  `SET NX PX` every second) and wait for your TTL to expire — the competitor
+  takes the lock with its own token. Clicking "Liberar com DEL direto
+  (ARMADILHA)" while still thinking it is yours makes the log show the
+  competitor's lock being deleted by mistake. The button next to it, "Liberar
+  com script (compare-and-delete)", performs the same release with a Lua
+  script that only deletes if the token on the server is still yours — the
+  only safe way to do it.
+- **The token-less variant.** Unchecking "Gerar token de posse" writes the key
+  with a fixed value, and the "Liberar com script" button becomes disabled:
+  with no token there is nothing to compare, and the only way out is a blind
+  `DEL`.
+- **Renewing ownership.** "Renovar automaticamente" runs a script every second
+  that only extends the TTL (`PEXPIRE`) if the token on the server is still
+  yours — keeping ownership without letting the deadline run out. If someone
+  else already took the lock, the renewal fails on its own and the screen
+  unchecks the checkbox.
+
 ## License
 
 MIT — Copyright (c) 2026 Fabiano Arndt. See `LICENSE`.

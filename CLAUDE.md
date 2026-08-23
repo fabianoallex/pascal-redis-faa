@@ -639,6 +639,29 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    sobre TLS —, incluindo as cinco consultas concorrentes e os dois lotes. Nenhum ajuste
    foi preciso depois da rodada Delphi (ao contrário do M7).
 
+   **Sample 2 concluído em 2026-08-23** (validação FPC) — `samples/LockDistribuidoVcl`,
+   copiado do esqueleto do `CacheAsideVcl`. Exercita `SET NX PX` (`Strings.SetWithOptions`
+   com `Condition := scNotExists`), release seguro por `Scripting.Run` com um Lua
+   compare-and-delete, renovação por outro Lua compare-and-`PEXPIRE`, e a armadilha do
+   `DEL` direto — um "concorrente" simulado (checkbox + `TTimer` de 1 s, tentando `SET NX
+   PX` com o próprio token sempre que a chave está livre) é quem torna a armadilha
+   reproduzível: sem um segundo dono de verdade, "liberar lock alheio" seria só teoria.
+   **Validado no FPC/LCL** com `lazbuild` limpo e uma bateria dirigida por mensagens Win32
+   cruas (`EnumChildWindows` + `BM_CLICK`/`WM_GETTEXT`/`WM_SETTEXT` via P/Invoke do
+   PowerShell — mesma ideia do `NativeWindowHandle` citado abaixo, só que dirigida de fora
+   do processo) contra o container, conferindo **no servidor** via `redis-cli`: adquirir
+   grava o token com o TTL certo (`PTTL` bate); liberar com o script apaga e some (`GET`
+   retorna nil); com o concorrente ligado e o TTL vencendo, o concorrente assume a chave
+   com o próprio token, e "Liberar com DEL direto" apaga exatamente o lock do concorrente,
+   logando a armadilha com o token certo; com "Gerar token de posse" desmarcado, o botão
+   "Liberar com script" fica desabilitado (`IsWindowEnabled` = False), forçando a via
+   insegura; e a renovação automática mantém o lock vivo muito além do TTL original (2 s)
+   por 5 s seguidos de `PEXPIRE`s bem-sucedidos. As legendas acentuadas (Conexão, Aquisição,
+   Concorrência, Liberação, Renovação) renderizaram corretas a partir do `.lfm` em UTF-8,
+   confirmando o par de escapes `.dfm` (`#231`, `#227`...)/`.lfm` (UTF-8 direto) descrito nas
+   convenções gerais. **Validação no Delphi 12 pela IDE ainda não foi feita** — fica para o
+   usuário, como de praxe (a Community Edition não compila por linha de comando).
+
    **Caixa de vazamento é o `Tests Leaked: 0` dos samples.** O `.dpr` liga
    `ReportMemoryLeaksOnShutdown` só no Delphi, então fechar a janela em silêncio é a prova
    de que cliente, marshals e work items foram todos liberados — inclusive no caminho de

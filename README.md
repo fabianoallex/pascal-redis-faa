@@ -698,6 +698,36 @@ thread, então **nada de rede acontece na thread da UI**. Toda operação é um
 `TRedisWorkItem` no `RedisPool`, e o resultado volta para a tela por um marshal
 descartável + `TThread.Queue`.
 
+### `LockDistribuidoVcl`
+
+Lock distribuído com `SET NX PX` e um token de posse. **Aviso na própria
+tela**: isto é um lock de **instância única** (um Redis só, sem coordenação
+entre vários) — não é Redlock. Se o processo dono morrer ou pausar por mais
+tempo que o TTL, a garantia cai junto.
+
+```
+cd samples\LockDistribuidoVcl
+lazbuild LockDistribuidoVcl.lpi
+LockDistribuidoVcl.exe
+```
+
+Três coisas para experimentar na tela:
+
+- **A armadilha do `DEL`.** Adquira o lock com um TTL curto, ligue "Simular
+  concorrente tentando o lock" (que fica tentando `SET NX PX` a cada 1s) e
+  espere o seu TTL vencer — o concorrente assume o lock com o próprio token.
+  Clicando "Liberar com DEL direto (ARMADILHA)" achando que ainda é seu, o log
+  mostra o lock do concorrente sendo apagado por engano. O botão ao lado,
+  "Liberar com script (compare-and-delete)", faz a mesma liberação com um Lua
+  que só apaga se o token no servidor ainda for o seu — é a única forma segura.
+- **A variante sem token.** Desmarcar "Gerar token de posse" grava a chave com
+  um valor fixo, e o botão "Liberar com script" fica desabilitado: sem token
+  não há o que comparar, e a única saída é o `DEL` às cegas.
+- **Renovação de posse.** "Renovar automaticamente" roda a cada 1s um script
+  que só estende o TTL (`PEXPIRE`) se o token no servidor ainda for o seu —
+  mantém a posse sem deixar o prazo estourar. Se alguém já tomou o lock, a
+  renovação falha sozinha e a tela desmarca o checkbox.
+
 ## Licença
 
 MIT — Copyright (c) 2026 Fabiano Arndt. Ver `LICENSE`.
