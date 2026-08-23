@@ -595,10 +595,99 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    - **`XAUTOCLAIM` aceita resposta de dois e de três itens** (Redis 6.2 x 7.0). Não há
      detecção de versão em lugar nenhum da lib: a forma da resposta é a informação, e ela
      chega junto com o dado.
-9. **M9 — 3 samples GUI duais VCL/LCL:** `CacheAsideVcl` (GET/SETEX/DEL, hit/miss),
-   `LockDistribuidoVcl` (`SET NX PX` + token de posse, release por Lua — mostra o erro
-   clássico de liberar lock alheio) e `FilaTarefasVcl` (Streams + consumer groups, dois
-   workers concorrentes). Candidatos posteriores: `PubSubVcl`, `RankingZSetVcl`,
-   `RateLimiterVcl`.
-10. **M10 — Validação Linux x86_64 + ARM64** (mesma receita de container da lib AMQP) e
+9. **M9 — Samples GUI duais VCL/LCL (Onda A: 5 samples).** Escopo fechado em 2026-08-23;
+   catálogo completo, racional e lista de descartados na **seção 49 de `docs/DECISOES.md`**.
+   Regra de curadoria que decide o desenho de cada um: **um mecanismo por sample**, e as
+   **variações do padrão são controles DENTRO do sample** (combo, checkbox, botão que
+   quebra a demonstração de propósito), nunca um app novo.
+
+   1. `CacheAsideVcl` — cache-aside com hit/miss e TTL na tela. Exercita `Strings` e
+      `Keys.Ttl`. Armadilha: **`SET` sem `KEEPTTL` apaga o TTL** — regravar o valor
+      cacheado com `SetValue` transforma o cache em vazamento permanente (está
+      documentado em `TRedisSetOptions`; aqui vira botão). Variações internas: TTL fixo
+      × com jitter (stampede), `DEL` × `UNLINK`.
+   2. `LockDistribuidoVcl` — lock com token de posse. Exercita `SET NX PX` e
+      `Scripting.Run` (release compare-and-delete em Lua, com o cache de SHA do M6).
+      Armadilha: liberar lock alheio com `DEL` depois de o próprio lock ter expirado.
+      Variações: sem token (errado) / com token / com renovação por `PEXPIRE` em Lua.
+      Precisa dizer na tela que é lock de instância única, não Redlock.
+   3. `FilaTarefasVcl` — fila de trabalho durável. Exercita Streams + consumer groups
+      (`XAdd`, `XGroupTryCreate`, `XReadGroupBlocking`, `XAck`, `XPendingIdle`,
+      `XAutoClaim`). Armadilhas: pendência sobrevivendo ao worker morto; entrada
+      apagada (`IsDeleted`). Variações: um × dois consumidores.
+   4. `PubSubVcl` — notificação efêmera. Exercita o `TRedisSubscriber` inteiro: conexão
+      dedicada, thread de leitura, reconexão com replay, padrões, RESP2 × RESP3.
+      Armadilhas: **mensagem publicada com o assinante fora do ar está perdida** (a lib
+      não finge fila local); callback lento segura o socket; `Execute` de dentro do
+      callback é recusado na hora.
+   5. `ReservaOtimistaVcl` — concorrência otimista. Exercita `Watch`/`Queue`/`TryCommit`
+      com laço de repetição. Armadilha: **`EXEC` não é rollback** — erro de execução de
+      um comando não desfaz os outros. Variações: sem `WATCH` (perde atualização, e isso
+      é visível com duas threads) / com `WATCH` + retry / a mesma operação em Lua,
+      atômica e sem retry.
+
+   **Ordem: o `CacheAsideVcl` primeiro**, porque é ele que estabelece o esqueleto dual
+   (form, marshal, worker, par `.dfm`/`.lfm`) que os outros quatro copiam.
+
+   **Molde de cada sample** (herdado dos 9 samples `*Vcl` da `pascal-amqp-faa`):
+
+   ```
+   samples/<Nome>Vcl/
+     <Nome>Vcl.dpr     IFDEF FPC: cthreads (UNIX) + Interfaces; ReportMemoryLeaksOnShutdown só no Delphi
+     <Nome>Vcl.dproj   (Delphi)
+     <Nome>Vcl.lpi     RequiredPackages: pascal_redis_faa + LCL; SyntaxMode Delphi;
+                       UnitOutputDirectory lib\$(TargetCPU)-$(TargetOS)-$(LCLWidgetType)
+     <Nome>Vcl.res
+     u<Nome>Main.pas   fonte ÚNICO para os dois mundos
+     u<Nome>Main.dfm + u<Nome>Main.lfm   dois arquivos de form mantidos em paralelo, à mão
+   ```
+
+   **Regras que valem em todo sample GUI deste projeto** (as quatro primeiras vêm dos
+   gotchas da codebase dual; as duas últimas são específicas do Redis):
+
+   - **Nada de rede na main thread.** O Redis é request/response: fora do pub/sub não há
+     callback de entrega, e quem chama `Strings.Get` **bloqueia a thread chamadora**.
+     Toda operação vai para um worker do `RedisPool` e volta para a UI por marshal
+     descartável + `TThread.Queue` (o FPC não tem o overload de closure anônima).
+     Isto é mais regra aqui do que na lib AMQP, não menos.
+   - Evento de conexão postado por thread que morre logo depois precisa **saltar por um
+     worker do `RedisPool`** — o FPC descarta o `TThread.Queue(nil, ...)` do postador
+     morto.
+   - Sob FPC, `uses LCLIntf, LCLType, LMessages` no lugar de `Windows, Messages`.
+   - O `.lfm` não leva `Font.Charset` nem `TForm.DesignSize`; o resto é idêntico ao `.dfm`.
+   - **`TRedisClient` é compartilhável entre threads** (ele É o pool) — é o que permite
+     dois workers concorrentes no `FilaTarefasVcl`. Já uma `TRedisConnection` avulsa não é.
+   - Comando bloqueante sai pelo **pool separado** (`ExecuteBlocking`), num worker
+     dedicado; nunca da main thread.
+
+   **Checklist de conclusão de cada sample:** `lazbuild <Nome>Vcl.lpi` limpo **e**
+   compilação no Delphi 12 pela IDE (a CE não compila por linha de comando); rodado de
+   fato contra o container; registrado em `Redis.lpg` **e** `Redis.groupproj`; descrito
+   no `README.md` **e** no `README.en.md`; LF em tudo, inclusive `.lfm`/`.dfm`/`.lpi`;
+   decisão nova (se houver) vira seção em `docs/DECISOES.md`. Todos os samples trazem
+   host/porta/senha/db e um **checkbox TLS** (o `RedisDefaultTlsParams` troca porta e
+   `UseTls` de uma vez) — TLS não é sample, é campo de tela.
+10. **M9.1 — segunda rodada de samples (catálogo, não escopo aberto).** Mesma forma dual
+    VCL/LCL e as mesmas regras de curadoria. Só abrir depois que a Onda A fechar, e
+    escolhendo por lacuna de cobertura, não por vontade de ter mais exemplos.
+
+    - **Onda B (padrões de alto valor):** `RateLimiterVcl` (janela fixa × deslizante ×
+      token bucket num combo, mostrando a borda da janela fixa deixar passar 2× o limite);
+      `RankingZSetVcl` (leaderboard: `ZIncrBy`, top-N, posição, empates);
+      `SessaoHashVcl` (TTL é da chave e não do campo; `HSET` não renova prazo);
+      `FilaListaVcl` (o **contraste** com Streams: `BLPop` sem ack perde a tarefa se o
+      worker morre; `RPopLPush` + lista de processamento como remendo); `LoteVsRttVcl`
+      (N comandos soltos × pipeline × `MULTI`, cronometrado).
+    - **Onda C (menores, ferramentas e contratos da lib):** `NavegadorChavesVcl`
+      (`Scan`/`KeyType`/`Ttl` + `HScan`/`SScan`/`ZScan`; por que `KEYS` trava o servidor e
+      por que `SCAN` pode repetir chave); `BinarioVcl` (contrato binário: imagem em
+      `TBytes`, CRLF no meio, `AsString` em bytes inválidos não levanta — o bug do M7);
+      `ResilienciaVcl` (painel do pool: `CLIENT KILL`, descarte × devolução, timeout, e a
+      decisão central — **comando em voo não é reexecutado**); `TagsSetsVcl`
+      (`SInter`/`SDiff`/`SInterCard`); `AgendadosZSetVcl` (jobs por timestamp;
+      `ZRangeByScore`+`ZRem` sem atomicidade entrega o job duas vezes).
+    - **Avaliados e descartados** (com motivo, na seção 49 de `docs/DECISOES.md`):
+      write-through/write-behind, contador de visitas, autocomplete por `ZRANGEBYLEX`,
+      HyperLogLog/Bitmaps/Geo, TLS como sample, Cluster/Sentinel.
+11. **M10 — Validação Linux x86_64 + ARM64** (mesma receita de container da lib AMQP) e
     READMEs completos com exemplos.

@@ -993,6 +993,84 @@ escrevi para concordar comigo.
 
 ---
 
+## 49. Samples: um mecanismo por app, variação por dentro (M9)
+
+O plano original do M9 eram três samples — cache-aside, lock e fila com streams.
+Eles cobrem `Strings`, `Keys`, `Scripting` e `Streams`, e deixam de fora o
+`TRedisSubscriber` inteiro (M7 — thread de leitura, reconexão, replay de
+assinatura), `MULTI`/`WATCH` (M6), o pipeline (M2), o comportamento do pool sob
+queda (M3) e as famílias `Hashes`, `Lists`, `Sets` e `ZSets` (M4). É metade do
+trabalho de oito milestones sem porta de entrada.
+
+Samples são onde o dev aprende a lib: o README mostra a chamada, o sample mostra
+**quando usar e o que dá errado**. Então o catálogo foi refeito inteiro antes de
+escrever a primeira form, no mesmo formato que a `pascal-amqp-faa` usou nos itens
+86 e 91 do seu `CLAUDE.md` — inclusive a lista de descartados, que lá é o que
+impediu de "repetir mecânica com roupagem diferente".
+
+Três regras saíram dessa rodada:
+
+**Um mecanismo por sample.** Se dois candidatos ensinam a mesma coisa, o segundo
+é descarte, não sample. O critério de escolha é lacuna de cobertura da lib, não
+vontade de ter mais exemplos.
+
+**Variação é controle DENTRO do sample, não outro app.** Limite de taxa não são
+três samples (janela fixa, deslizante, token bucket): é um sample com um combo de
+três algoritmos, o que ainda deixa comparar os três lado a lado — que é
+justamente o que ensina. O precedente é o `PrioridadeVcl` da lib AMQP, que deixou
+o campo Prefetch editável **de propósito**, para o dev quebrar a demonstração e
+descobrir por que ela dependia daquilo.
+
+Esta regra é também o que torna um catálogo grande viável. Cada app novo custa
+cinco arquivos (`.dpr`, `.dproj`, `.lpi`, `.dfm`, `.lfm`), registro em dois
+group-projects, validação nos dois compiladores e parágrafo nos dois READMEs.
+Uma variação interna custa um `TComboBox`.
+
+**Todo sample carrega a armadilha, com botão para reproduzi-la.** É o que separa
+vitrine de API de material de aprendizado, e a lib tem armadilhas boas de mostrar:
+`SET` sem `KEEPTTL` apagando o prazo, `DEL` liberando lock alheio, `EXEC` que não
+é rollback, mensagem de pub/sub perdida com o assinante fora do ar.
+
+A Onda A ficou em **cinco** samples, e não em três nem em oito. Três deixavam os
+buracos de milestone acima; oito não fecham num milestone, porque o primeiro
+custa caro (estabelece o esqueleto dual — form, marshal, worker, par
+`.dfm`/`.lfm`) e só a partir do segundo o custo cai. Os dois acrescentados —
+`PubSubVcl` e `ReservaOtimistaVcl` — são exatamente os milestones com mais
+mecânica escondida e nenhuma porta de entrada.
+
+### Avaliados e descartados nesta rodada
+
+- **Write-through / write-behind** — delta pequeno sobre o cache-aside; vira um
+  botão nele, se tanto.
+- **Contador de visitas / métricas** — `Incr` já aparece no cache-aside e no
+  rate limiter da Onda B; sozinho não ensina nada novo.
+- **Autocomplete por `ZRANGEBYLEX`, HyperLogLog, Bitmaps, Geo** — a lib não expõe
+  família para nenhum deles; só pelo `Execute` genérico. Adiar para depois da
+  `Redis.Commands.Server`, ou usar um deles como vitrine do escape hatch — nunca
+  como sample de padrão, porque o padrão não é o que estaria sendo ensinado.
+- **TLS** — não é sample, é um checkbox presente em todos eles. A decisão que TLS
+  carrega (outra porta, não upgrade em banda) está na seção 31 e cabe no tooltip.
+- **Cluster / Sentinel** — fora do v1 por decisão fechada; sample seria promessa
+  de suporte que a lib não tem.
+
+### O que muda do desenho dos samples da lib AMQP
+
+Vale registrar porque é contraintuitivo para quem vem do repo irmão: **o Redis é
+request/response**. Na lib AMQP a UI recebia entregas por callback, vindo de uma
+thread do pool; aqui, fora do pub/sub, não existe callback de entrega — quem
+chama `Strings.Get` **bloqueia a própria thread**. Chamar da main thread congela a
+form, e o sintoma aparece justo quando o servidor está lento, que é quando alguém
+está olhando. Por isso a regra "nada de rede na main thread" é mais rígida nestes
+samples do que nos da AMQP, não menos.
+
+Do outro lado, dois fatos facilitam: **não há topologia** (sem declare/bind, o
+miolo do sample é o padrão e não o setup, e os arquivos ficam bem menores que os
+da AMQP), e **`TRedisClient` é compartilhável entre threads**, porque ele é o
+pool — é o que deixa dois workers concorrentes dividirem um cliente só no
+`FilaTarefasVcl`, sem nenhuma cerimônia.
+
+---
+
 ## Compatibilidade e nomenclatura
 
 A lib fala RESP, não depende da implementação: funciona com **Redis**, **Valkey**, **KeyDB**
