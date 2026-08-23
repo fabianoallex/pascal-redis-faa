@@ -8,6 +8,11 @@
           <Mode Name="Default"/>
         </BuildModes>
       </Target>
+      <Target FileName="samples\CacheAsideVcl\CacheAsideVcl.lpi">
+        <BuildModes>
+          <Mode Name="Default"/>
+        </BuildModes>
+      </Target>
       <Target FileName="tests\Unit\fpc\RedisUnitTestsFpc.lpi">
         <BuildModes>
           <Mode Name="Default"/>

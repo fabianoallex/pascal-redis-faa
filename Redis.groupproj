@@ -6,6 +6,9 @@
         <Projects Include="samples\SmokeTest\SmokeTest.dproj">
             <Dependencies/>
         </Projects>
+        <Projects Include="samples\CacheAsideVcl\CacheAsideVcl.dproj">
+            <Dependencies/>
+        </Projects>
         <Projects Include="tests\Unit\Redis.UnitTests.dproj">
             <Dependencies/>
         </Projects>
@@ -29,6 +32,15 @@
     <Target Name="SmokeTest:Make">
         <MSBuild Projects="samples\SmokeTest\SmokeTest.dproj" Targets="Make"/>
     </Target>
+    <Target Name="CacheAsideVcl">
+        <MSBuild Projects="samples\CacheAsideVcl\CacheAsideVcl.dproj"/>
+    </Target>
+    <Target Name="CacheAsideVcl:Clean">
+        <MSBuild Projects="samples\CacheAsideVcl\CacheAsideVcl.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="CacheAsideVcl:Make">
+        <MSBuild Projects="samples\CacheAsideVcl\CacheAsideVcl.dproj" Targets="Make"/>
+    </Target>
     <Target Name="Redis_UnitTests">
         <MSBuild Projects="tests\Unit\Redis.UnitTests.dproj"/>
     </Target>
@@ -49,16 +61,19 @@
     </Target>
     <Target Name="Build">
         <CallTarget Targets="SmokeTest"/>
+        <CallTarget Targets="CacheAsideVcl"/>
         <CallTarget Targets="Redis_UnitTests"/>
         <CallTarget Targets="Redis_IntegrationSuite"/>
     </Target>
     <Target Name="Clean">
         <CallTarget Targets="SmokeTest:Clean"/>
+        <CallTarget Targets="CacheAsideVcl:Clean"/>
         <CallTarget Targets="Redis_UnitTests:Clean"/>
         <CallTarget Targets="Redis_IntegrationSuite:Clean"/>
     </Target>
     <Target Name="Make">
         <CallTarget Targets="SmokeTest:Make"/>
+        <CallTarget Targets="CacheAsideVcl:Make"/>
         <CallTarget Targets="Redis_UnitTests:Make"/>
         <CallTarget Targets="Redis_IntegrationSuite:Make"/>
     </Target>

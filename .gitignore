@@ -18,6 +18,7 @@ linux/
 
 # binarios ELF (sem extensao) gerados por lazbuild em Linux no proprio diretorio
 samples/SmokeTest/SmokeTest
+samples/CacheAsideVcl/CacheAsideVcl
 tests/Unit/fpc/RedisUnitTestsFpc
 
 # certificados do servidor TLS de dev (gerar localmente; ver docker/certs/README.md)

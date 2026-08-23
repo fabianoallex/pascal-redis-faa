@@ -8,7 +8,7 @@ from a single codebase, written from scratch. MIT licensed.
 > the Keys, Strings, Hashes, Lists, Sets, ZSets and Streams commands through the typed
 > facade — blocking ones included — over RESP2 or RESP3, encrypt all of it with TLS, use
 > `MULTI`/`EXEC`/`WATCH` and Lua scripts with SHA caching, publish to and subscribe to
-> channels, and build a work queue with consumer groups. What is left are the GUI samples
+> channels, and build a work queue with consumer groups. What is left are the remaining GUI samples
 > (M9) and the Linux validation (M10). The full roadmap lives in `CLAUDE.md`
 > (Portuguese).
 
@@ -661,6 +661,53 @@ opposite of what the run was meant to prove.
 `--tls` needs the override and the certs (see "TLS"). Worth running on both
 backends: the normal build uses SChannel, and `lazbuild -B
 --build-mode=openssl SmokeTest.lpi` switches to OpenSSL.
+
+## GUI samples (VCL/LCL)
+
+Each sample is a single app that compiles in both worlds from the **same
+source** — `lazbuild <Name>.lpi` on FPC/Lazarus, or open the `.dproj` in Delphi.
+All of them carry host/port/password/database plus a TLS checkbox (ticking it
+also switches the port, because TLS in Redis is not an in-band upgrade: it is a
+separate port).
+
+The guiding rule is one mechanism per app, with the variations of the pattern as
+controls inside the screen itself — and each sample puts the pattern's trap
+behind a button, so you can reproduce it instead of only reading about it.
+
+### `CacheAsideVcl`
+
+The full cycle: miss → fetch from the slow source → store with a TTL → hit →
+expire. The slow source is simulated with a `Sleep` of editable duration,
+because what matters is the cycle, not where the data comes from.
+
+```
+cd samples\CacheAsideVcl
+lazbuild CacheAsideVcl.lpi
+CacheAsideVcl.exe
+```
+
+Three things to try on screen:
+
+- **The `SET` trap.** The "Regravar SEM KEEPTTL" button writes the value with
+  `Strings.SetValue` and the "TTL restante" label jumps to **SEM PRAZO** (no
+  expiry): a plain `SET` wipes the key's deadline, and a cache rewritten that way
+  becomes a permanent leak — the kind of bug that only shows up weeks later, as
+  memory that never stops growing. The button next to it performs the same write
+  with `Expiry := seKeepTtl` and the deadline keeps running.
+- **The stampede.** "Consultar 5x ao mesmo tempo" fires five concurrent lookups
+  on the same cold key: all five miss the cache and all five hit the source.
+  Cache-aside alone does not protect against this, and the log shows the five
+  misses within the same millisecond.
+- **Mass expiry.** Warming 20 keys with a fixed TTL makes the bar drop from 20 to
+  0 at once (they all expire in the same second, and the whole batch of misses
+  lands on the source together); with jitter — the same TTL ±20% drawn per key —
+  the bar decays gradually.
+
+The sample also establishes the threading pattern for the GUI samples in this
+project: since Redis is request/response, whoever calls `Strings.Get` blocks
+their own thread, so **no network work happens on the UI thread**. Every
+operation is a `TRedisWorkItem` on `RedisPool`, and the result comes back to the
+screen through a disposable marshal + `TThread.Queue`.
 
 ## License
 

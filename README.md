@@ -9,7 +9,7 @@ Cliente **Redis** (protocolo RESP2/RESP3) para **Free Pascal/Lazarus e Delphi**,
 > Streams pela fachada tipada — inclusive os bloqueantes — em RESP2 ou RESP3, cifrar tudo
 > isso com TLS, usar `MULTI`/`EXEC`/`WATCH` e scripts Lua com cache de SHA, publicar e
 > assinar canais, e montar fila de trabalho com consumer groups. O que falta são os
-> samples GUI (M9) e a validação em Linux (M10). O roadmap completo está em `CLAUDE.md`.
+> demais samples GUI (M9) e a validação em Linux (M10). O roadmap completo está em `CLAUDE.md`.
 
 Projeto irmão da [`pascal-amqp-faa`](../pascal-amqp-faa) (cliente AMQP 0-9-1) e da
 `pascal-pipes-faa` (IPC), com as mesmas regras: codebase dual FPC 3.2.2 + Delphi 12,
@@ -651,6 +651,52 @@ sucesso, que é justo o contrário do que se queria provar.
 O `--tls` precisa do override e dos certs (seção "TLS"). Vale rodá-lo nos dois
 backends: o build normal usa SChannel, e `lazbuild -B --build-mode=openssl
 SmokeTest.lpi` troca para OpenSSL.
+
+## Samples GUI (VCL/LCL)
+
+Cada sample é um app único que compila nos dois mundos a partir do **mesmo
+fonte** — `lazbuild <Nome>.lpi` no FPC/Lazarus, ou abrir o `.dproj` no Delphi.
+Todos trazem host/porta/senha/banco e um checkbox TLS (marcá-lo troca a porta
+junto, porque no Redis TLS não é upgrade em banda: é outra porta).
+
+O princípio dos samples é um mecanismo por app, com as variações do padrão como
+controles dentro da própria tela — e cada um traz a armadilha do padrão num
+botão, para dar para reproduzi-la em vez de só ler sobre ela.
+
+### `CacheAsideVcl`
+
+O ciclo completo: miss → busca na fonte lenta → grava com TTL → hit → expira.
+A fonte lenta é simulada por um `Sleep` de tempo editável, porque o que importa
+é o ciclo, não de onde o dado vem.
+
+```
+cd samples\CacheAsideVcl
+lazbuild CacheAsideVcl.lpi
+CacheAsideVcl.exe
+```
+
+Três coisas para experimentar na tela:
+
+- **A armadilha do `SET`.** O botão "Regravar SEM KEEPTTL" grava o valor com
+  `Strings.SetValue` e o rótulo "TTL restante" pula para **SEM PRAZO**: um `SET`
+  simples apaga o prazo da chave, e um cache regravado assim vira vazamento
+  permanente — o tipo de bug que só aparece semanas depois, como memória que não
+  para de crescer. O botão ao lado faz a mesma gravação com `Expiry := seKeepTtl`
+  e o prazo continua correndo.
+- **A debandada.** "Consultar 5x ao mesmo tempo" dispara cinco consultas
+  concorrentes na mesma chave fria: as cinco erram o cache e as cinco vão à
+  fonte. O cache-aside sozinho não protege contra isso, e o log mostra os cinco
+  misses no mesmo milissegundo.
+- **Expiração em massa.** Aquecer 20 chaves com TTL fixo faz a barra despencar
+  de 20 para 0 de uma vez (todas expiram no mesmo segundo, e o lote inteiro de
+  misses cai na fonte junto); com jitter — o mesmo TTL ±20% sorteado por chave —
+  a barra desce aos poucos.
+
+O sample também estabelece o padrão de threads dos samples GUI deste projeto:
+como o Redis é request/response, quem chama `Strings.Get` bloqueia a própria
+thread, então **nada de rede acontece na thread da UI**. Toda operação é um
+`TRedisWorkItem` no `RedisPool`, e o resultado volta para a tela por um marshal
+descartável + `TThread.Queue`.
 
 ## Licença
 

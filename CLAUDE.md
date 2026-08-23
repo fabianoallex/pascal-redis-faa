@@ -629,6 +629,23 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    **Ordem: o `CacheAsideVcl` primeiro**, porque é ele que estabelece o esqueleto dual
    (form, marshal, worker, par `.dfm`/`.lfm`) que os outros quatro copiam.
 
+   **Estado (2026-08-23):** o `CacheAsideVcl` está escrito e **validado no FPC/LCL** —
+   `lazbuild` limpo e a bateria inteira dirigida por UI Automation contra o container,
+   conferindo no servidor (não só no log da app) que o `SET` simples zera o TTL (`-1`),
+   que o `KEEPTTL` preserva, que o `DEL` some com a chave (`-2`), e que o lote com TTL
+   fixo fica com **um** valor de TTL para as 20 chaves enquanto o lote com jitter espalha
+   por sete valores. **Falta a validação no Delphi 12** (IDE, pelo `Redis.groupproj`) —
+   é o passo que derrubou um bug no M7 e o que ainda não foi feito aqui.
+
+   Dois achados do esqueleto que valem para os próximos quatro samples: (a) o `.lpi`
+   precisa de `GraphicApplication` em `Linking/Options/Win32`, senão o FPC linka o app
+   como **console** e abre uma janela preta atrás da form — os samples `*Vcl` da
+   `pascal-amqp-faa` têm esse defeito, então a correção não veio de lá; (b) a LCL não
+   expõe provider de UI Automation, então os controles aparecem como `Pane` sem pattern
+   nenhum: para dirigir a GUI por script, use o `NativeWindowHandle` com `BM_CLICK`, e
+   leia o `TMemo` pela propriedade `Name` do elemento (`TLabel` não tem HWND e é
+   invisível para a automação — por isso o log da app precisa dizer tudo que a tela diz).
+
    **Molde de cada sample** (herdado dos 9 samples `*Vcl` da `pascal-amqp-faa`):
 
    ```
