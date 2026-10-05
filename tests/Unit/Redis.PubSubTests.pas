@@ -32,7 +32,7 @@ uses
   System.SyncObjs,
   Redis.Types,
   Redis.Resp,
-  Redis.Threading,
+  PascalCommon.Threading,
   Redis.Connection,
   Redis.Commands,
   Redis.PubSub,
@@ -435,7 +435,7 @@ begin
   // Trava de seguranca: sem ela, um teste que esquece de fechar o fake
   // penduraria a suite, porque a thread de leitura fica esperando o servidor
   // falar — que e' exatamente o comportamento correto dela.
-  LDeadline := RedisTickMs + 10000;
+  LDeadline := PcTickMs + 10000;
   while True do
   begin
     FLock.Enter;
@@ -458,7 +458,7 @@ begin
     finally
       FLock.Leave;
     end;
-    if RedisTickMs >= LDeadline then
+    if PcTickMs >= LDeadline then
       Exit(0);
     FData.WaitFor(20);
   end;
@@ -704,7 +704,7 @@ var
   LDeadline: UInt64;
   LTem: Integer;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     FLock.Enter;
     try
@@ -715,7 +715,7 @@ begin
     if LTem >= ACount then
       Exit(True);
     Sleep(5);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -725,7 +725,7 @@ var
   LDeadline: UInt64;
   LTem: Integer;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     FLock.Enter;
     try
@@ -736,7 +736,7 @@ begin
     if LTem >= ACount then
       Exit(True);
     Sleep(5);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -745,7 +745,7 @@ var
   LDeadline: UInt64;
   LTem: Integer;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     FLock.Enter;
     try
@@ -756,7 +756,7 @@ begin
     if LTem >= ACount then
       Exit(True);
     Sleep(5);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -766,7 +766,7 @@ var
   LDeadline: UInt64;
   LTem: Integer;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     FLock.Enter;
     try
@@ -777,7 +777,7 @@ begin
     if LTem >= ACount then
       Exit(True);
     Sleep(5);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -870,12 +870,12 @@ function EsperaAssinaturas(ASub: TRedisSubscriber; ACount,
 var
   LDeadline: UInt64;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     if Length(ASub.Channels) >= ACount then
       Exit(True);
     Sleep(5);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 

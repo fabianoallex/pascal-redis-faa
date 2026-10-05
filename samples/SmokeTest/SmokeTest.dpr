@@ -48,7 +48,7 @@ uses
   SysUtils,
   Classes,
   SyncObjs,
-  Redis.Threading,
+  PascalCommon.Threading,
   Redis.Transport,
   Redis.Types,
   Redis.Resp,
@@ -481,7 +481,7 @@ begin
     LConn.Open;
     // BLPOP numa fila vazia espera ate' o timeout DELE (2 s); o do socket
     // (300 ms) estoura antes.
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     LPegou := False;
     try
       LConn.Execute('BLPOP', [Chave('fila-vazia'), 2]);
@@ -489,7 +489,7 @@ begin
       on E: ERedisTimeout do
         LPegou := True;
     end;
-    LDecorrido := RedisTickMs - LInicio;
+    LDecorrido := PcTickMs - LInicio;
     Passo('BLPOP alem do timeout levanta ERedisTimeout', LPegou,
       ' -> ' + IntToStr(LDecorrido) + ' ms');
     Passo('e desiste antes dos 2 s do comando', LDecorrido < 1500);
@@ -695,14 +695,14 @@ begin
 
     { bloqueante: sai por conexao FORA do pool comum, com o prazo do socket
       esticado para alem do prazo do comando }
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     Passo('Lists.BLPop acha o que ja esta na fila',
       LClient.Lists.BLPop([Chave('f:proc')], 5, LChaveBloq, LValorBloq) and
       (LValorBloq = 'c'));
     Passo('BLPop com fila vazia devolve False no prazo, sem erro',
       not LClient.Lists.BLPop([Chave('f:vazia')], 1, LChaveBloq, LValorBloq));
     Passo('e o bloqueante nao segurou o pool comum',
-      (LClient.Pool.InUseCount = 0) and (RedisTickMs - LInicio < 5000));
+      (LClient.Pool.InUseCount = 0) and (PcTickMs - LInicio < 5000));
 
     { conjuntos }
     LClient.Sets.SAddMany(Chave('f:set:a'), ['redis', 'pascal']);
@@ -827,7 +827,7 @@ begin
   LParams.ReceiveTimeoutMs := 700;
   LConn := TRedisConnection.Create(LParams);
   try
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     LPegou := False;
     LMensagem := '';
     try
@@ -840,7 +840,7 @@ begin
       end;
     end;
     Passo('TLS contra porta plain desiste por timeout, nao trava', LPegou,
-      ' -> ' + IntToStr(RedisTickMs - LInicio) + ' ms');
+      ' -> ' + IntToStr(PcTickMs - LInicio) + ' ms');
     // A mensagem tem de apontar a porta, senao o usuario vai procurar defeito
     // no certificado quando o que errou foi o numero da porta.
     Passo('e a mensagem aponta a porta como causa provavel',
@@ -1120,7 +1120,7 @@ var
   LDeadline: UInt64;
   LTem: Integer;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     FLock.Enter;
     try
@@ -1131,7 +1131,7 @@ begin
     if LTem >= ACount then
       Exit(True);
     Sleep(5);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -1364,13 +1364,13 @@ begin
       (Length(LDados) = 1) and (Length(LDados[0].Entries) = 1) and
       (LDados[0].Entries[0].Id = LId2));
 
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     LDados := LClient.Streams.XReadBlocking([Chave('x:log')],
       [REDIS_STREAM_LAST], 700);
     // BLOCK e em MILISSEGUNDOS, ao contrario do timeout do BLPOP. Prazo
     // vencido sem novidade e o caso NORMAL de um leitor ocioso.
     Passo('XREAD BLOCK espera o prazo em ms e volta vazio',
-      (Length(LDados) = 0) and (RedisTickMs - LInicio >= 500));
+      (Length(LDados) = 0) and (PcTickMs - LInicio >= 500));
 
     { --- trim --- }
     for I := 1 to 10 do

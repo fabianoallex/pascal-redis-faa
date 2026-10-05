@@ -73,7 +73,8 @@ uses
   Redis.Resp,
   Redis.Commands,
   Redis.Connection,
-  Redis.Threading;
+  PascalCommon.Threading,
+  PascalCommon.ThreadPool;
 
 const
   /// Quanto o Subscribe espera pela confirmacao do servidor antes de desistir.
@@ -170,7 +171,7 @@ type
       que nao ha' como correlacionar duas. }
     FCmdLock: TCriticalSection;
     { Guarda os conjuntos confirmados, a geracao e a resposta pendente. }
-    FMon: TRedisMonitor;
+    FMon: TPcMonitor;
     FStop: TEvent;
     { O que a APLICACAO pediu. E' isto que a reconexao reenvia. }
     FWantChannels: TStringList;
@@ -527,7 +528,7 @@ begin
   FCommandTimeoutMs := REDIS_SUBSCRIBE_TIMEOUT_MS;
   FConnLock := TCriticalSection.Create;
   FCmdLock := TCriticalSection.Create;
-  FMon := TRedisMonitor.Create;
+  FMon := TPcMonitor.Create;
   FStop := TEvent.Create(nil, True, False, '');   // manual reset
   FWantChannels := NewNameList;
   FWantPatterns := NewNameList;
@@ -763,7 +764,7 @@ var
 
 begin
   LLive := LiveListOf(AKind);
-  LDeadline := RedisTickMs + UInt64(FSubscribeTimeoutMs);
+  LDeadline := PcTickMs + UInt64(FSubscribeTimeoutMs);
   Result := False;
   FMon.Enter;
   try
@@ -773,7 +774,7 @@ begin
         Exit(False);            // caiu no meio: nao ha' o que confirmar
       if Satisfied then
         Exit(True);
-      LNow := RedisTickMs;
+      LNow := PcTickMs;
       if LNow >= LDeadline then
         Exit(False);
       FMon.Wait(Cardinal(LDeadline - LNow));
@@ -788,7 +789,7 @@ function TRedisSubscriber.WaitReply(AGeneration,
 var
   LDeadline, LNow: UInt64;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   FMon.Enter;
   try
     while not FReplyReady do
@@ -796,7 +797,7 @@ begin
       if FGeneration <> AGeneration then
         raise ERedisConnectionLost.Create(
           'a conexao do assinante caiu antes da resposta');
-      LNow := RedisTickMs;
+      LNow := PcTickMs;
       if LNow >= LDeadline then
         raise ERedisTimeout.CreateFmt(
           'o servidor nao respondeu em %d ms', [ATimeoutMs]);

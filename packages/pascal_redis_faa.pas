@@ -8,7 +8,7 @@ unit pascal_redis_faa;
 interface
 
 uses
-  Redis.Threading, Redis.Types, Redis.Resp, Redis.Connection, Redis.Pool, 
+  Redis.Types, Redis.Resp, Redis.Connection, Redis.Pool, 
   Redis.Commands, Redis.Commands.Keys, Redis.Commands.Strings, 
   Redis.Commands.Hashes, Redis.Commands.Lists, Redis.Commands.Sets, 
   Redis.Commands.ZSets, Redis.Commands.Streams, Redis.Commands.Scripting, 

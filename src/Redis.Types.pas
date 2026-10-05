@@ -10,14 +10,29 @@
   3.2.2 no porte da pascal-amqp-faa (e o contorno AmqpUnwrapValue). A arvore
   RESP e' pequena e fechada, entao vale modelar a mao. Sendo interface, o
   refcount libera a arvore inteira sozinho — as suites rodam com zero leaks sem
-  ninguem cacar Free. Ver docs/DECISOES.md. }
+  ninguem cacar Free. Ver docs/DECISOES.md.
+
+  E' aqui, logo depois do uses, que mora a checagem da versao minima da
+  pascal-common-faa (de onde vem a concorrencia da lib desde a migracao F8 do
+  plano dela: PcTickMs, TPcMonitor, TPcThreadPool, PcPool). Esta unit nao usa
+  nada de la' alem da constante, mas e' a base que toda unit de protocolo da
+  lib usa -- inclusive Redis.Pool e Redis.PubSub, as que dependem da
+  pascal-common-faa --, entao uma copia velha demais para o build com a
+  mensagem abaixo antes de qualquer "identificador nao encontrado". A
+  condicional so' enxerga constantes de units ja' usadas, por isso vem depois
+  do uses. }
 
 {$I redis.inc}
 
 interface
 
 uses
-  SysUtils, Math;
+  SysUtils, Math,
+  PascalCommon.Version;
+
+{$IF PASCALCOMMON_VERSION < 10000}
+  {$MESSAGE FATAL 'pascal-redis-faa precisa da pascal-common-faa 1.0.0 ou mais nova'}
+{$IFEND}
 
 const
   /// Porta padrao do Redis em texto claro.

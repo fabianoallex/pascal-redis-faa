@@ -26,8 +26,8 @@ Todas saíram da avaliação de viabilidade (2026-08-22). Racional detalhado em
   `TRedisConnection` (1 socket) → `TRedisPool` (N conexões) → `TRedisClient` (fachada).
 - **Sem thread de leitura nas conexões de comando.** Fora do pub/sub o servidor só fala
   quando perguntado, então a própria thread chamadora escreve e lê, sob o lock da conexão.
-  Zero handoff entre threads. Thread de leitura + `RedisPool` (o thread pool) existem
-  APENAS para pub/sub e comandos bloqueantes.
+  Zero handoff entre threads. Thread de leitura existe APENAS para pub/sub; o pool de
+  threads (`PcPool`, da pascal-common-faa) a lib nem usa — só os samples GUI.
 - **Conexão que sofreu timeout ou erro de I/O é DESTRUÍDA, nunca devolvida ao pool.** Pode
   haver resposta órfã no buffer, e devolvê-la contamina o próximo comando com a resposta do
   anterior. É o bug clássico de cliente Redis; merece teste de integração dedicado.
@@ -52,9 +52,40 @@ Todas saíram da avaliação de viabilidade (2026-08-22). Racional detalhado em
 - **Fora do v1:** Redis Cluster (redirects `MOVED`/`ASK`, 16384 slots, CRC16), Sentinel,
   client-side caching (`CLIENT TRACKING`) e mTLS. Não abrir esses escopos sem o usuário.
 
+## Dependência: pascal-common-faa
+
+Atomics, relógio monotônico, monitor e pool de threads vêm da **pascal-common-faa**
+(`../pascal-common-faa`, MIT, mesmo autor) desde a migração de 2026-10-04 (fase F8 do
+plano dela; racional na seção 50 de `docs/DECISOES.md`). Até ali eram a `Redis.Threading`,
+cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
+
+- **Nomes:** `PcAtomic*`, `PcTickMs` (unit `PascalCommon.Threading`); `TPcMonitor`,
+  `TPcWorkItem`, `TPcThreadPool`, `PcPool`, `PC_WAIT_INFINITE` (`PascalCommon.ThreadPool`).
+  **`TRedisPool` é o pool de CONEXÕES** e não tem nada a ver com isso; ao renomear,
+  sempre palavra inteira (`\b`) e `perl -pi`, nunca `sed -i` (troca CRLF por LF no Git
+  for Windows — gotcha 3 da pascal-common-faa).
+- **A lib nunca embute a pascal-common-faa.** O `pascal_redis_faa.lpk` exige
+  `pascal_common_faa` **só pelo nome**, com `MinVersion` 1: a aplicação fornece a cópia
+  única. O submódulo `external/pascal-common-faa` (tag `v1.1.0`, checkout **sem**
+  `--recursive`) existe para testes, samples e scripts. Os `.lpi` deles listam
+  `pascal_common_faa` **primeiro**, com `DefaultFilename` em `external/` e `Prefer="True"`
+  (sem o `Prefer`, um pacote registrado no IDE ganharia); os `.dproj` têm
+  `..\..\external\pascal-common-faa\src` no search path.
+- **Checagem de versão mínima** na `Redis.Types`, logo depois do `uses` que traz
+  `PascalCommon.Version` (a condicional só enxerga constantes de units já usadas). Ao
+  passar a usar algo novo da pascal-common-faa, suba o mínimo ali **e** no `MinVersion`.
+- **`PcPool` é um pool só para o processo inteiro**, dividido com qualquer outra lib.
+  É finalizado DEPOIS das units da lib — e, num app GUI, depois de a form já ter sido
+  liberada (LCL e VCL liberam as forms num exit proc, antes de qualquer finalização de
+  unit; medido no FPC, ver seção 50). Item que toca a form tem de ser esperado antes.
+  O `Destroy` de um `TPcThreadPool` **executa** a fila inteira; só descarta o item
+  enfileirado depois de o `Destroy` começar.
+- **Correção na pascal-common-faa não se faz daqui.** O que precisar mudar lá vai para
+  `.ci/f8-findings-for-pascal-common-faa.md` (versionado).
+
 ## Peças herdadas da pascal-amqp-faa
 
-Quatro units foram copiadas e renomeadas (`AMQP.*` → `Redis.*`, `TAMQP*` → `TRedis*`,
+Três units foram copiadas e renomeadas (`AMQP.*` → `Redis.*`, `TAMQP*` → `TRedis*`,
 `Amqp*` → `Redis*`, `AMQP_*` → `REDIS_*`). Cada uma carrega um bloco de PROVENIENCIA logo
 após o include do `redis.inc`. **Sem dependência entre repositórios** — mesmo padrão do
 `Pipes.Threading.pas` na `pascal-pipes-faa`: correção de bug de um lado deve ser portada
@@ -62,7 +93,6 @@ manualmente para o outro.
 
 | Unit | Origem | Papel |
 |---|---|---|
-| `Redis.Threading` | `AMQP.Threading` | atomics, `RedisTickMs`, `TRedisMonitor`, `TRedisThreadPool`/`RedisPool` |
 | `Redis.Transport` | `AMQP.Transport` | `TRedisTcpSocket`, `ERedisTransport`, `ERedisTls`, `RedisTlsBackendName/Info` |
 | `Redis.Transport.Tls` | `AMQP.Transport.Tls` | TLS via SChannel — só Windows (`REDIS_WINDOWS`, automático) |
 | `Redis.Transport.OpenSSL` | `AMQP.Transport.OpenSSL` | TLS via OpenSSL — qualquer plataforma, opt-in `-dREDIS_OPENSSL` |
@@ -108,11 +138,11 @@ Toda unit começa com o include do `redis.inc` (ativa o mode Delphi no FPC e def
 
 | Proibido (não existe no FPC 3.2) | Usar |
 |---|---|
-| `reference to procedure` / métodos anônimos / `TThread.CreateAnonymousThread` | `procedure ... of object`; work items (`TRedisWorkItem`) para capturar estado |
-| `System.Threading` (`TTask.Run`, `TParallel.For`) | `RedisPool.Queue(...)` de `Redis.Threading` |
-| `System.TMonitor` (Enter/Wait/PulseAll) | `TRedisMonitor` de `Redis.Threading` |
-| `TInterlocked.*` / `AtomicXxx` direto | `RedisAtomicInc/Dec/Get/Set/CompareExchange/Read64/Write64` |
-| `TThread.GetTickCount64` | `RedisTickMs` |
+| `reference to procedure` / métodos anônimos / `TThread.CreateAnonymousThread` | `procedure ... of object`; work items (`TPcWorkItem`) para capturar estado |
+| `System.Threading` (`TTask.Run`, `TParallel.For`) | `PcPool.Queue(...)` de `PascalCommon.ThreadPool` |
+| `System.TMonitor` (Enter/Wait/PulseAll) | `TPcMonitor` de `PascalCommon.ThreadPool` |
+| `TInterlocked.*` / `AtomicXxx` direto | `PcAtomicInc/Dec/Get/Set/CompareExchange/Read64/Write64` de `PascalCommon.Threading` |
+| `TThread.GetTickCount64` | `PcTickMs` de `PascalCommon.Threading` |
 | `System.Net.Socket` direto | `TRedisTcpSocket` de `Redis.Transport` |
 | `TEncoding.UTF8.GetBytes/GetString` | `RedisUtf8Encode/Decode` (a criar no M1, em `Redis.Types`) |
 | uses com namespace (`System.SysUtils`) | nome curto (`SysUtils`); no Delphi resolve via unit scope names `System;Winapi` |
@@ -160,7 +190,7 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
 - Samples GUI: `TThread.Queue`/`.Synchronize` do FPC só têm o overload sem parâmetros —
   toda closure vira um objeto de "marshal" descartável. E o FPC **descarta**
   `TThread.Queue(nil, ...)` postado por thread que morre antes de a main thread bombear a
-  fila → saltar por um worker do `RedisPool`. Ver `PublicadorConfiavelVcl` na lib AMQP.
+  fila → saltar por um worker do `PcPool`. Ver `PublicadorConfiavelVcl` na lib AMQP.
 - Samples GUI: `uses Windows, Messages` não compila fora do Windows → no FPC usar `LCLIntf`,
   `LCLType` e `LMessages` (`LM_VSCROLL` = `WM_VSCROLL`). LCL não tem `Font.Charset` nem
   `TForm.DesignSize` no `.lfm`.
@@ -171,7 +201,6 @@ Existentes (M0 a M8):
 
 ```
 src/redis.inc
-src/Redis.Threading.pas          (cópia renomeada)
 src/Redis.Transport.pas          (cópia renomeada; timeouts de socket no M3)
 src/Redis.Transport.Tls.pas      (cópia renomeada)
 src/Redis.Transport.OpenSSL.pas  (cópia renomeada)
@@ -211,11 +240,27 @@ nunca bloqueia o usuário da lib.
 
 ## Build e testes
 
-- **FPC direto:** `fpc -Fusrc -Fisrc -FEbuild -FUbuild samples\SmokeTest\SmokeTest.dpr`
+- **Antes de tudo:** `git submodule update --init external/pascal-common-faa` (sem
+  `--recursive`; o submódulo dela não é preciso aqui).
+- **FPC direto:** `fpc -Fusrc -Fisrc -Fuexternal\pascal-common-faa\src
+  -Fiexternal\pascal-common-faa\src -FEbuild -FUbuild samples\SmokeTest\SmokeTest.dpr`
   (somar `-dREDIS_OPENSSL` para o backend OpenSSL). Compilador em
   `C:\lazarus4.0\fpc\3.2.2\bin\x86_64-win64\fpc.exe`.
-- **Pacote Lazarus:** `lazbuild packages\pascal_redis_faa.lpk`. Se o lazbuild não conhecer o
-  pacote, registrar antes com `lazbuild --add-package-link packages\pascal_redis_faa.lpk`.
+- **Pacote Lazarus:** `lazbuild packages\pascal_redis_faa.lpk` só compila sozinho com um
+  `pascal_common_faa` registrado (`lazbuild --add-package-link
+  external\pascal-common-faa\packages\pascal_common_faa.lpk`); sem isso dá
+  `Broken dependency`, e é de propósito (ver "Dependência: pascal-common-faa"). Os `.lpi`
+  de testes e samples não precisam de registro: apontam para o submódulo. Se o lazbuild
+  não conhecer o pacote da lib, registrar com
+  `lazbuild --add-package-link packages\pascal_redis_faa.lpk`.
+- **Scripts das suítes FPC:** `sh tools/test_fpc.sh` (Windows, lazbuild; `BUILDMODE=openssl`
+  para o outro backend) e `sh tools/test_fpc_docker.sh` (Linux, FPC 3.2.2 em container;
+  `CPUS=1 RUNS=5` e vários ao mesmo tempo para caçar corrida — cada execução sobe um Redis
+  próprio, então não disputam servidor). Critério: 0 erros, 0 falhas e
+  `0 unfreed memory blocks` no **arquivo** do heaptrc (`HEAPTRC=log=`). O heaptrc só foi
+  ligado nos `.lpi` de teste na migração para a pascal-common-faa: **até ali o FPC nunca
+  mediu vazamento neste repo** (o `Tests Leaked: 0` dos milestones é do DUnitX). No Debian
+  o heaptrc não imprime nada sem o `log=`, nem com vazamento.
 - **Build mode `openssl`:** `lazbuild -B --build-mode=openssl <proj>.lpi`. O define vai numa
   `SharedMatrixOptions` amarrada ao mode — é o único jeito de alcançar as units do
   **pacote** (Custom Options do projeto não recompilam o pacote). Trocar de mode recompila
@@ -538,7 +583,7 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
      em silêncio só aparece quando o TCP desiste — o Redis não tem heartbeat. Quem
      precisa detectar antes chama `Ping` de um timer da aplicação.
    - **O callback roda NA THREAD DE LEITURA, em ordem.** Ordem é o único compromisso que
-     o pub/sub do Redis cumpre; despachar pelo `RedisPool` daria vazão e a embaralharia.
+     o pub/sub do Redis cumpre; despachar pelo `PcPool` daria vazão e a embaralharia.
      O preço está no contrato: callback lento segura o socket. Exceção de callback vai
      para o `OnError` e não derruba a conexão, e `Execute` de dentro do callback é
      recusado na hora (quem leria a resposta é a thread que está no callback).
@@ -665,7 +710,7 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    **Sample 3 concluído em 2026-08-23** (validação FPC) — `samples/FilaTarefasVcl`, também
    copiado do esqueleto do `CacheAsideVcl`. Exercita `XAdd`, `XGroupTryCreate`,
    `XReadGroupBlocking`, `XAck`, `XAutoClaim` e `XReadGroup` com `'0'`. A novidade de
-   threading: cada consumidor é um **laço persistente** num worker do `RedisPool` (fica
+   threading: cada consumidor é um **laço persistente** num worker do `PcPool` (fica
    bloqueado em `XReadGroupBlocking`, acorda com tarefa ou timeout, repete até ser
    desligado), não uma operação avulsa — e cada ida ao servidor tem seu PRÓPRIO
    `UsarCliente`/`SoltarCliente`, nunca um só cobrindo o laço inteiro. É o que faz
@@ -733,15 +778,16 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
    ```
 
    **Regras que valem em todo sample GUI deste projeto** (as quatro primeiras vêm dos
-   gotchas da codebase dual; as duas últimas são específicas do Redis):
+   gotchas da codebase dual; as duas seguintes são específicas do Redis; as duas últimas
+   vieram da migração para a pascal-common-faa — seção 50 de `docs/DECISOES.md`):
 
    - **Nada de rede na main thread.** O Redis é request/response: fora do pub/sub não há
      callback de entrega, e quem chama `Strings.Get` **bloqueia a thread chamadora**.
-     Toda operação vai para um worker do `RedisPool` e volta para a UI por marshal
+     Toda operação vai para um worker do `PcPool` e volta para a UI por marshal
      descartável + `TThread.Queue` (o FPC não tem o overload de closure anônima).
      Isto é mais regra aqui do que na lib AMQP, não menos.
    - Evento de conexão postado por thread que morre logo depois precisa **saltar por um
-     worker do `RedisPool`** — o FPC descarta o `TThread.Queue(nil, ...)` do postador
+     worker do `PcPool`** — o FPC descarta o `TThread.Queue(nil, ...)` do postador
      morto.
    - Sob FPC, `uses LCLIntf, LCLType, LMessages` no lugar de `Windows, Messages`.
    - O `.lfm` não leva `Font.Charset` nem `TForm.DesignSize`; o resto é idêntico ao `.dfm`.
@@ -749,6 +795,16 @@ O v1 fecha no **M8** (decidido em 2026-08-22): kernel + comandos + TLS + pipelin
      dois workers concorrentes no `FilaTarefasVcl`. Já uma `TRedisConnection` avulsa não é.
    - Comando bloqueante sai pelo **pool separado** (`ExecuteBlocking`), num worker
      dedicado; nunca da main thread.
+   - **Todo work item herda de `TItemDaForm`**, que conta o item desde o enfileiramento
+     até o destrutor, e o fechamento espera esse contador zerar: o `FormCloseQuery`
+     bombeando a fila do `TThread.Queue` (`CheckSynchronize`), o `FormDestroy` sem
+     bombear. A LCL e a VCL liberam a form num exit proc, **antes** de qualquer
+     finalização de unit — o `PcPool` roda as sobras com ela já morta. Contar só de
+     `UsarCliente` a `SoltarCliente` não basta (era assim, e foi medido o consumidor do
+     `FilaTarefasVcl` acordando 2,6 s depois do `FormDestroy`).
+   - **Worker não lê controle.** O que o item precisa da tela é lido na thread da UI,
+     na hora de enfileirar, e vai no construtor. Ler `TEdit.Text` de um worker no LCL é
+     `SendMessage` para a thread da UI — que no fechamento está parada esperando.
 
    **Checklist de conclusão de cada sample:** `lazbuild <Nome>Vcl.lpi` limpo **e**
    compilação no Delphi 12 pela IDE (a CE não compila por linha de comando); rodado de

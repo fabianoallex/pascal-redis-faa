@@ -23,7 +23,6 @@ uses
   DUnitX.TestFramework,
   Redis.Types in '..\..\src\Redis.Types.pas',
   Redis.Resp in '..\..\src\Redis.Resp.pas',
-  Redis.Threading in '..\..\src\Redis.Threading.pas',
   Redis.Transport in '..\..\src\Redis.Transport.pas',
   Redis.Transport.Tls in '..\..\src\Redis.Transport.Tls.pas',
   Redis.Connection in '..\..\src\Redis.Connection.pas',

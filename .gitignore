@@ -35,3 +35,12 @@ dunitx-results.xml
 *.stat
 __history/
 __recovery/
+
+# saidas de tools/test_fpc.sh (log de build e de execucao, resumo do heaptrc)
+tests/*/fpc/build.log
+tests/*/fpc/run.log
+tests/*/fpc/heap.txt
+
+# copia da lista de pacotes do Lazarus que o lazbuild larga no diretorio corrente
+# ao compilar um .lpk com dependencia nao resolvida (pascal_common_faa sem registro)
+/packagefiles.xml

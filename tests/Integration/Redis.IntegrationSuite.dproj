@@ -74,7 +74,7 @@
         <DCC_DcuOutput>.\$(Platform)\$(Config)</DCC_DcuOutput>
         <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
-        <DCC_UnitSearchPath>$(DUnitX);..\..\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+        <DCC_UnitSearchPath>$(DUnitX);..\..\src;..\..\external\pascal-common-faa\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <SanitizedProjectName>Redis_IntegrationSuite</SanitizedProjectName>
         <UsingDelphiRTL>true</UsingDelphiRTL>
     </PropertyGroup>
@@ -124,7 +124,6 @@
         </DelphiCompile>
         <DCCReference Include="..\..\src\Redis.Types.pas"/>
         <DCCReference Include="..\..\src\Redis.Resp.pas"/>
-        <DCCReference Include="..\..\src\Redis.Threading.pas"/>
         <DCCReference Include="..\..\src\Redis.Transport.pas"/>
         <DCCReference Include="..\..\src\Redis.Transport.Tls.pas"/>
         <DCCReference Include="..\..\src\Redis.Connection.pas"/>

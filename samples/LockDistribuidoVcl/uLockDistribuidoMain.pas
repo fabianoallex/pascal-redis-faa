@@ -47,7 +47,8 @@ uses
   {$ENDIF}
   SysUtils, Classes, SyncObjs,
   Graphics, Controls, Forms, Dialogs, StdCtrls, ExtCtrls,
-  Redis.Types, Redis.Threading, Redis.Transport, Redis.Client,
+  Redis.Types, PascalCommon.Threading, PascalCommon.ThreadPool,
+  Redis.Transport, Redis.Client,
   Redis.Commands.Strings, Redis.Commands.Keys, Redis.Commands.Scripting;
 
 type
@@ -112,6 +113,7 @@ type
     FLock: TCriticalSection;
     FClient: TRedisClient;
     FEmVoo: Integer;
+    FItensVivos: Integer;    // work items vivos, desde o enfileiramento (TItemDaForm)
     FEncerrando: Boolean;
     FAmostraEmVoo: Boolean;
     FConcorrenteEmVoo: Boolean;
@@ -124,6 +126,9 @@ type
     function LeParams(out AParams: TRedisParams): Boolean;
     function ChaveDoLock: string;
     function TtlEscolhido: Integer;
+    /// Espera os work items vivos (TItemDaForm) ate' o teto; ABombeia roda os
+    /// marshals que eles postam enquanto isso (so' com a form inteira viva).
+    procedure EsperaItens(ATetoMs: Integer; ABombeia: Boolean);
   public
     { --- Chamados pelos workers, sempre pela thread da UI (via marshal) --- }
     procedure Log(const ATexto: string);
@@ -182,7 +187,7 @@ const
   reconhecer no log quem gerou o que. }
 function GeraToken(const APrefixo: string): string;
 begin
-  Result := APrefixo + '-' + IntToHex(Int64(RedisTickMs), 10) + '-' +
+  Result := APrefixo + '-' + IntToHex(Int64(PcTickMs), 10) + '-' +
     IntToHex(Random(MaxInt), 8);
 end;
 
@@ -313,30 +318,45 @@ begin
 end;
 
 { ---------------------------------------------------------------------------
-  Work items: rodam num worker do RedisPool (threads persistentes).
+  Work items: rodam num worker do PcPool (threads persistentes).
   --------------------------------------------------------------------------- }
 
 type
-  TConectarWork = class(TRedisWorkItem)
-  private
+  { Base dos work items: conta o item na form desde o ENFILEIRAMENTO -- o
+    construtor roda na thread da UI, antes do PcPool.Queue -- ate' o DESTRUTOR,
+    que roda tambem quando o pool libera o item sem executar e e' o ultimo
+    acesso do item a' form. O fechamento espera esse contador zerar (ver
+    FormCloseQuery): contar so' de UsarCliente a SoltarCliente deixava de fora
+    o item ainda na fila e o que esta' fora dessa janela, e eles rodariam
+    depois de a form ser liberada -- a LCL e a VCL liberam as forms num exit
+    proc, ANTES de qualquer finalizacao de unit, inclusive a que libera o
+    PcPool. E' o padrao do docs/migrating.md da pascal-common-faa. }
+  TItemDaForm = class(TPcWorkItem)
+  protected
     FForm: TfrmLockDistribuido;
+  public
+    constructor Create(AForm: TfrmLockDistribuido);
+    destructor Destroy; override;
+  end;
+
+type
+  TConectarWork = class(TItemDaForm)
+  private
     FParams: TRedisParams;
   public
     constructor Create(AForm: TfrmLockDistribuido; const AParams: TRedisParams);
     procedure Execute; override;
   end;
 
-  TDesconectarWork = class(TRedisWorkItem)
+  TDesconectarWork = class(TItemDaForm)
   private
-    FForm: TfrmLockDistribuido;
   public
     constructor Create(AForm: TfrmLockDistribuido);
     procedure Execute; override;
   end;
 
-  TAdquirirWork = class(TRedisWorkItem)
+  TAdquirirWork = class(TItemDaForm)
   private
-    FForm: TfrmLockDistribuido;
     FChave: string;
     FToken: string;
     FTtlMs: Integer;
@@ -347,9 +367,8 @@ type
     procedure Execute; override;
   end;
 
-  TLiberarWork = class(TRedisWorkItem)
+  TLiberarWork = class(TItemDaForm)
   private
-    FForm: TfrmLockDistribuido;
     FChave: string;
     FToken: string;
     FSeguro: Boolean;
@@ -359,9 +378,8 @@ type
     procedure Execute; override;
   end;
 
-  TRenovarWork = class(TRedisWorkItem)
+  TRenovarWork = class(TItemDaForm)
   private
-    FForm: TfrmLockDistribuido;
     FChave: string;
     FToken: string;
     FTtlMs: Integer;
@@ -371,22 +389,35 @@ type
     procedure Execute; override;
   end;
 
-  TAmostraWork = class(TRedisWorkItem)
+  TAmostraWork = class(TItemDaForm)
   private
-    FForm: TfrmLockDistribuido;
     FChave: string;
   public
     constructor Create(AForm: TfrmLockDistribuido; const AChave: string);
     procedure Execute; override;
   end;
 
+{ TItemDaForm }
+
+constructor TItemDaForm.Create(AForm: TfrmLockDistribuido);
+begin
+  inherited Create;
+  FForm := AForm;
+  PcAtomicInc(FForm.FItensVivos);
+end;
+
+destructor TItemDaForm.Destroy;
+begin
+  PcAtomicDec(FForm.FItensVivos);
+  inherited;
+end;
+
 { TConectarWork }
 
 constructor TConectarWork.Create(AForm: TfrmLockDistribuido;
   const AParams: TRedisParams);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FParams := AParams;
 end;
 
@@ -422,8 +453,7 @@ end;
 
 constructor TDesconectarWork.Create(AForm: TfrmLockDistribuido);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
 end;
 
 procedure TDesconectarWork.Execute;
@@ -466,8 +496,7 @@ end;
 constructor TAdquirirWork.Create(AForm: TfrmLockDistribuido;
   const AChave, AToken: string; ATtlMs: Integer; AConcorrente: Boolean);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
   FToken := AToken;
   FTtlMs := ATtlMs;
@@ -528,8 +557,7 @@ end;
 constructor TLiberarWork.Create(AForm: TfrmLockDistribuido;
   const AChave, AToken: string; ASeguro: Boolean);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
   FToken := AToken;
   FSeguro := ASeguro;
@@ -598,8 +626,7 @@ end;
 constructor TRenovarWork.Create(AForm: TfrmLockDistribuido;
   const AChave, AToken: string; ATtlMs: Integer);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
   FToken := AToken;
   FTtlMs := ATtlMs;
@@ -647,8 +674,7 @@ end;
 
 constructor TAmostraWork.Create(AForm: TfrmLockDistribuido; const AChave: string);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
 end;
 
@@ -704,7 +730,6 @@ procedure TfrmLockDistribuido.FormCloseQuery(Sender: TObject;
   var CanClose: Boolean);
 var
   LClient: TRedisClient;
-  LEspera: Integer;
 begin
   CanClose := True;
   tmrAmostra.Enabled := False;
@@ -714,41 +739,54 @@ begin
   FLock.Enter;
   try
     FEncerrando := True;
-    LClient := FClient;
   finally
     FLock.Leave;
   end;
-  if LClient = nil then
-    Exit;
 
-  // Mesma logica do CacheAsideVcl: espera na propria thread da UI porque a
-  // janela ja' esta' indo embora, com teto para nao pendurar a aplicacao.
-  LEspera := 0;
-  while LEspera < 500 do
-  begin
-    FLock.Enter;
-    try
-      if FEmVoo = 0 then
-        Break;
-    finally
-      FLock.Leave;
-    end;
-    Sleep(10);
-    Inc(LEspera);
-  end;
+  // Mesma logica do CacheAsideVcl: espera TODOS os work items (TItemDaForm),
+  // com a form inteira viva e bombeando os marshals que eles postam, com teto
+  // para nao pendurar a aplicacao. Ver o comentario la'.
+  EsperaItens(10000, True);
+  // Um marshal pode ter religado algum timer durante a espera.
+  tmrAmostra.Enabled := False;
+  tmrConcorrente.Enabled := False;
+  tmrRenovar.Enabled := False;
 
   FLock.Enter;
   try
+    LClient := FClient;
     FClient := nil;
   finally
     FLock.Leave;
   end;
-  LClient.Free;
+  LClient.Free;  // inclusive o que um TConectarWork tenha aberto na espera
 end;
 
 procedure TfrmLockDistribuido.FormDestroy(Sender: TObject);
 begin
+  // Normalmente o FormCloseQuery ja' esperou tudo; cobre a form destruida sem
+  // passar por ele. Sem bombear: marshal nenhum deve rodar contra esta form.
+  FLock.Enter;
+  try
+    FEncerrando := True;
+  finally
+    FLock.Leave;
+  end;
+  EsperaItens(10000, False);
+  FreeAndNil(FClient);
   FLock.Free;
+end;
+
+procedure TfrmLockDistribuido.EsperaItens(ATetoMs: Integer; ABombeia: Boolean);
+var
+  LPrazo: UInt64;
+begin
+  LPrazo := PcTickMs + UInt64(ATetoMs);
+  while (PcAtomicGet(FItensVivos) > 0) and (PcTickMs < LPrazo) do
+    if ABombeia then
+      CheckSynchronize(10)
+    else
+      Sleep(10);
 end;
 
 function TfrmLockDistribuido.UsarCliente(out AClient: TRedisClient): Boolean;
@@ -871,7 +909,7 @@ begin
     Exit;
   btnConectar.Enabled := False;
   lblStatus.Caption := 'Conectando...';
-  RedisPool.Queue(TConectarWork.Create(Self, LParams));
+  PcPool.Queue(TConectarWork.Create(Self, LParams));
 end;
 
 procedure TfrmLockDistribuido.btnDesconectarClick(Sender: TObject);
@@ -881,7 +919,7 @@ begin
   tmrConcorrente.Enabled := False;
   tmrRenovar.Enabled := False;
   lblStatus.Caption := 'Encerrando as operacoes em voo...';
-  RedisPool.Queue(TDesconectarWork.Create(Self));
+  PcPool.Queue(TDesconectarWork.Create(Self));
 end;
 
 procedure TfrmLockDistribuido.ConexaoAberta(const AInfo: string);
@@ -933,7 +971,7 @@ begin
     LToken := GeraToken('eu')
   else
     LToken := 'sem-token';
-  RedisPool.Queue(TAdquirirWork.Create(Self, ChaveDoLock, LToken,
+  PcPool.Queue(TAdquirirWork.Create(Self, ChaveDoLock, LToken,
     TtlEscolhido, False));
 end;
 
@@ -983,7 +1021,7 @@ var
 begin
   FLock.Enter;
   try
-    LOcupado := FConcorrenteEmVoo;
+    LOcupado := FConcorrenteEmVoo or FEncerrando;
     if not LOcupado then
       FConcorrenteEmVoo := True;
   finally
@@ -991,7 +1029,7 @@ begin
   end;
   if LOcupado then
     Exit;
-  RedisPool.Queue(TAdquirirWork.Create(Self, ChaveDoLock, GeraToken('concorrente'),
+  PcPool.Queue(TAdquirirWork.Create(Self, ChaveDoLock, GeraToken('concorrente'),
     TtlEscolhido, True));
 end;
 
@@ -1002,12 +1040,12 @@ begin
     ShowMessage('Voce ainda nao adquiriu um lock com token.');
     Exit;
   end;
-  RedisPool.Queue(TLiberarWork.Create(Self, ChaveDoLock, FMeuToken, True));
+  PcPool.Queue(TLiberarWork.Create(Self, ChaveDoLock, FMeuToken, True));
 end;
 
 procedure TfrmLockDistribuido.btnLiberarArmadilhaClick(Sender: TObject);
 begin
-  RedisPool.Queue(TLiberarWork.Create(Self, ChaveDoLock, FMeuToken, False));
+  PcPool.Queue(TLiberarWork.Create(Self, ChaveDoLock, FMeuToken, False));
 end;
 
 procedure TfrmLockDistribuido.MostraLiberar(ASeguro, ASucesso: Boolean;
@@ -1075,7 +1113,7 @@ begin
   end;
   FLock.Enter;
   try
-    LOcupado := FRenovarEmVoo;
+    LOcupado := FRenovarEmVoo or FEncerrando;
     if not LOcupado then
       FRenovarEmVoo := True;
   finally
@@ -1083,7 +1121,7 @@ begin
   end;
   if LOcupado then
     Exit;
-  RedisPool.Queue(TRenovarWork.Create(Self, ChaveDoLock, LToken, TtlEscolhido));
+  PcPool.Queue(TRenovarWork.Create(Self, ChaveDoLock, LToken, TtlEscolhido));
 end;
 
 procedure TfrmLockDistribuido.MostraRenovacao(ASucesso, AJaExplicado: Boolean);
@@ -1128,7 +1166,7 @@ begin
   end;
   if LOcupado then
     Exit;
-  RedisPool.Queue(TAmostraWork.Create(Self, ChaveDoLock));
+  PcPool.Queue(TAmostraWork.Create(Self, ChaveDoLock));
 end;
 
 procedure TfrmLockDistribuido.MostraAmostra(const ADono: string; APttlMs: Int64);

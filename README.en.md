@@ -569,18 +569,38 @@ flattened map.
 
 ## Build
 
+**Dependency:** the library uses
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.0.0 or later**
+— the base shared by the `*-faa` libraries, which provides the monitor/condvar, the
+portable atomics, the monotonic clock and the thread pool (`TPcMonitor`, `PcAtomic*`,
+`PcTickMs`, `PcPool`). **Your application** provides the copy, a single one for every
+`*-faa` library it uses: on Lazarus, register `pascal_common_faa.lpk` (`pascal_redis_faa.lpk`
+requires it by name); on Delphi, put its `src` on the search path. A copy that is too old
+stops the build with a message saying so. This repository's
+`external/pascal-common-faa` submodule is there only for the tests and samples:
+
+```
+git submodule update --init external/pascal-common-faa
+```
+
+`PcPool` is **one pool for the whole process**, shared with the other `*-faa`
+libraries. The library itself queues nothing on it (pub/sub has its own reader
+thread); the GUI samples do.
+
 **FPC (command line):**
 
 ```
-fpc -Fusrc -Fisrc -FEbuild -FUbuild samples\SmokeTest\SmokeTest.dpr
+fpc -Fusrc -Fisrc -Fuexternal\pascal-common-faa\src -Fiexternal\pascal-common-faa\src -FEbuild -FUbuild samples\SmokeTest\SmokeTest.dpr
 ```
 
-**Lazarus:** `lazbuild packages\pascal_redis_faa.lpk`, then the projects; the
-`openssl` build mode (`lazbuild -B --build-mode=openssl <proj>.lpi`) switches the
-TLS backend.
+**Lazarus:** `lazbuild packages\pascal_redis_faa.lpk` (with `pascal_common_faa.lpk`
+registered), then the projects; the test and sample `.lpi` files already point at the
+submodule and need no registration. The `openssl` build mode
+(`lazbuild -B --build-mode=openssl <proj>.lpi`) switches the TLS backend.
 
 **Delphi:** open `Redis.groupproj` in the IDE (the Community Edition cannot
-compile from the command line).
+compile from the command line). The projects already have
+`external\pascal-common-faa\src` on their search path.
 
 ## Unit tests
 
@@ -638,6 +658,17 @@ tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain
 On Delphi, open `Redis.groupproj` and build `Redis.IntegrationSuite`.
 
 With no parameters the executables open the GUI with the test tree.
+
+**Both FPC sides by script**, with heaptrc on (the criterion includes
+`0 unfreed memory blocks`):
+
+```
+sh tools/test_fpc.sh            # Windows, lazbuild (BUILDMODE=openssl for the other backend)
+sh tools/test_fpc_docker.sh     # Linux, FPC 3.2.2 in a container
+```
+
+The Linux script starts a Redis of its own on every run, so several can run at once,
+with `CPUS=1 RUNS=5`, to hunt concurrency races.
 
 Both suites have the same coverage and the test bodies are identical — that is
 what `tests\Unit\Redis.DUnitXCompat.pas` is for. Every change to one goes into
@@ -706,8 +737,14 @@ Three things to try on screen:
 The sample also establishes the threading pattern for the GUI samples in this
 project: since Redis is request/response, whoever calls `Strings.Get` blocks
 their own thread, so **no network work happens on the UI thread**. Every
-operation is a `TRedisWorkItem` on `RedisPool`, and the result comes back to the
+operation is a `TPcWorkItem` on `PcPool`, and the result comes back to the
 screen through a disposable marshal + `TThread.Queue`.
+
+On close, the form waits for **every** work item it queued — counted from the moment
+it was queued, not only the ones talking to the server — and runs the marshals they post
+while it waits. LCL and VCL free the form before any unit finalization, and the thread
+pool is freed in one of those: without this wait, a late item would run against a form
+that is already gone (see section 50 of `docs/DECISOES.md`).
 
 ### `LockDistribuidoVcl`
 
@@ -777,7 +814,7 @@ Four things to try on screen:
   around to reclaim what it abandons, or both to watch the work split between
   them while the survivor keeps going and the dead one's task sits pending.
 - **A consumer as a persistent loop.** Unlike the other samples, each
-  consumer is a loop running on a `RedisPool` worker — it blocks on
+  consumer is a loop running on a `PcPool` worker — it blocks on
   `XReadGroupBlocking`, wakes up with a task or a timeout, and repeats until
   turned off. Every round trip to the server has its own
   `UsarCliente`/`SoltarCliente` pair, never one covering the whole loop —

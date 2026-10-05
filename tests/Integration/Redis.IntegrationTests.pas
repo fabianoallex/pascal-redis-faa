@@ -33,7 +33,7 @@ uses
   System.Classes,
   System.SyncObjs,
   Redis.Types,
-  Redis.Threading,
+  PascalCommon.Threading,
   Redis.Connection,
   Redis.Pool,
   Redis.Client,
@@ -493,7 +493,7 @@ begin
   LConn := TRedisConnection.Create(LParams);
   try
     LConn.Open;
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     LClasse := '';
     try
       LConn.Execute('BLPOP', [Chave('fila-que-nao-existe'), 2]);
@@ -501,7 +501,7 @@ begin
       on E: Exception do
         LClasse := E.ClassName;
     end;
-    LDecorridoMs := RedisTickMs - LInicio;
+    LDecorridoMs := PcTickMs - LInicio;
 
     TAssert.AssertEquals('ERedisTimeout', LClasse);
     TAssert.AssertTrue('devia desistir bem antes dos 2 s do BLPOP: ' +
@@ -1266,11 +1266,11 @@ begin
     LimpaChaves(LClient, ['l:b1', 'l:b2']);
     LClient.Lists.RPush(Chave('l:b2'), 'tarefa');
 
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     TAssert.AssertTrue('achou',
       LClient.Lists.BLPop([Chave('l:b1'), Chave('l:b2')], 5, LChave, LValor));
     // Com valor disponivel o BLPOP nem chega a bloquear.
-    TAssert.AssertTrue('voltou na hora', RedisTickMs - LInicio < 2000);
+    TAssert.AssertTrue('voltou na hora', PcTickMs - LInicio < 2000);
     // Com varias chaves na chamada, so' a resposta diz de qual delas veio.
     TAssert.AssertEquals(Chave('l:b2'), LChave);
     TAssert.AssertEquals('tarefa', LValor);
@@ -1298,10 +1298,10 @@ begin
   try
     LimpaChaves(LClient, ['l:vazia']);
 
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     TAssert.AssertFalse('nada chegou',
       LClient.Lists.BLPop([Chave('l:vazia')], 2, LChave, LValor));
-    LGasto := RedisTickMs - LInicio;
+    LGasto := PcTickMs - LInicio;
 
     // Esperou o prazo do COMANDO (2 s), nao o do socket (1 s).
     TAssert.AssertTrue('esperou os 2 s do comando', LGasto >= 1800);
@@ -1944,12 +1944,12 @@ function TRedisMensagensRecebidas.Espera(ACount, ATimeoutMs: Integer): Boolean;
 var
   LDeadline: UInt64;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     if Total >= ACount then
       Exit(True);
     Sleep(5);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -1958,7 +1958,7 @@ var
   LDeadline: UInt64;
   LTem: Integer;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     FLock.Enter;
     try
@@ -1969,7 +1969,7 @@ begin
     if LTem > 0 then
       Exit(True);
     Sleep(10);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -2029,13 +2029,13 @@ var
   LDeadline: UInt64;
   LContagem: TRedisChannelCountArray;
 begin
-  LDeadline := RedisTickMs + UInt64(ATimeoutMs);
+  LDeadline := PcTickMs + UInt64(ATimeoutMs);
   repeat
     LContagem := AClient.PubSub.CountSubscribers([ACanal]);
     if (Length(LContagem) = 1) and (LContagem[0].Subscribers >= ACount) then
       Exit(True);
     Sleep(10);
-  until RedisTickMs >= LDeadline;
+  until PcTickMs >= LDeadline;
   Result := False;
 end;
 
@@ -2510,10 +2510,10 @@ begin
     LimpaChaves(LClient, ['x:vazio']);
     LClient.Streams.XAdd(Chave('x:vazio'), ['t', 'marco']);
 
-    LInicio := RedisTickMs;
+    LInicio := PcTickMs;
     LDados := LClient.Streams.XReadBlocking([Chave('x:vazio')],
       [REDIS_STREAM_LAST], 2000);
-    LGasto := RedisTickMs - LInicio;
+    LGasto := PcTickMs - LInicio;
 
     // Prazo vencido sem novidade e' o caso NORMAL de um leitor ocioso.
     TAssert.AssertEquals(0, Length(LDados));

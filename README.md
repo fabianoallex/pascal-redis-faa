@@ -558,18 +558,37 @@ servidor como mapa achatado.
 
 ## Build
 
+**Dependência:** a lib usa a
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.0.0 ou mais
+nova** — a base compartilhada pelas libs `*-faa`, de onde vêm o monitor/condvar, os
+atomics portáveis, o relógio monotônico e o pool de threads (`TPcMonitor`, `PcAtomic*`,
+`PcTickMs`, `PcPool`). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
+libs `*-faa` que ela usar: no Lazarus, registre o `pascal_common_faa.lpk` (o
+`pascal_redis_faa.lpk` o exige pelo nome); no Delphi, ponha o `src` dela no search path.
+Uma cópia velha demais para o build com uma mensagem dizendo isso. O submódulo
+`external/pascal-common-faa` deste repositório serve só aos testes e samples:
+
+```
+git submodule update --init external/pascal-common-faa
+```
+
+O `PcPool` é **um pool para o processo inteiro**, dividido com as outras libs `*-faa`.
+A lib em si não enfileira nada nele (o pub/sub tem thread de leitura própria); quem usa
+são os samples GUI.
+
 **FPC (linha de comando):**
 
 ```
-fpc -Fusrc -Fisrc -FEbuild -FUbuild samples\SmokeTest\SmokeTest.dpr
+fpc -Fusrc -Fisrc -Fuexternal\pascal-common-faa\src -Fiexternal\pascal-common-faa\src -FEbuild -FUbuild samples\SmokeTest\SmokeTest.dpr
 ```
 
-**Lazarus:** `lazbuild packages\pascal_redis_faa.lpk` e depois os projetos; o
-build mode `openssl` (`lazbuild -B --build-mode=openssl <proj>.lpi`) troca o
-backend TLS.
+**Lazarus:** `lazbuild packages\pascal_redis_faa.lpk` (com o `pascal_common_faa.lpk`
+registrado) e depois os projetos; os `.lpi` de testes e samples já apontam para o
+submódulo e não precisam de registro. O build mode `openssl`
+(`lazbuild -B --build-mode=openssl <proj>.lpi`) troca o backend TLS.
 
 **Delphi:** abrir `Redis.groupproj` no IDE (a Community Edition não compila por
-linha de comando).
+linha de comando). Os projetos já trazem `external\pascal-common-faa\src` no search path.
 
 ## Testes unitários
 
@@ -628,6 +647,17 @@ tests\Integration\fpc\RedisIntegrationTestsFpc.exe --all --format=plain
 No Delphi, abrir `Redis.groupproj` e compilar `Redis.IntegrationSuite`.
 
 Sem parâmetros os executáveis abrem a interface gráfica com a árvore de testes.
+
+**Os dois lados do FPC por script**, com o heaptrc ligado (o critério inclui
+`0 unfreed memory blocks`):
+
+```
+sh tools/test_fpc.sh            # Windows, lazbuild (BUILDMODE=openssl para o outro backend)
+sh tools/test_fpc_docker.sh     # Linux, FPC 3.2.2 num container
+```
+
+O script do Linux sobe um Redis próprio a cada execução, então dá para rodar vários ao
+mesmo tempo, com `CPUS=1 RUNS=5`, para caçar corrida de concorrência.
 
 As duas suítes têm a mesma cobertura e o corpo dos testes é idêntico — o
 `tests\Unit\Redis.DUnitXCompat.pas` existe para isso. Toda mudança em uma vai
@@ -695,8 +725,14 @@ Três coisas para experimentar na tela:
 O sample também estabelece o padrão de threads dos samples GUI deste projeto:
 como o Redis é request/response, quem chama `Strings.Get` bloqueia a própria
 thread, então **nada de rede acontece na thread da UI**. Toda operação é um
-`TRedisWorkItem` no `RedisPool`, e o resultado volta para a tela por um marshal
+`TPcWorkItem` no `PcPool`, e o resultado volta para a tela por um marshal
 descartável + `TThread.Queue`.
+
+No fechamento, a form espera **todos** os work items que enfileirou — contados desde o
+enfileiramento, não só os que estão falando com o servidor — e roda os marshals que
+eles postam enquanto espera. A LCL e a VCL liberam a form antes de qualquer finalização
+de unit, e o pool de threads é liberado numa delas: sem essa espera, um item atrasado
+rodaria contra a form já liberada (ver a seção 50 de `docs/DECISOES.md`).
 
 ### `LockDistribuidoVcl`
 
@@ -761,7 +797,7 @@ Quatro coisas para experimentar na tela:
   reivindicar o que ele abandonar, ou os dois para ver o trabalho se repartir
   e o sobrevivente seguir enquanto o morto fica pendente.
 - **Consumidor como laço persistente.** Ao contrário dos outros samples, cada
-  consumidor é um laço rodando num worker do `RedisPool` — fica bloqueado em
+  consumidor é um laço rodando num worker do `PcPool` — fica bloqueado em
   `XReadGroupBlocking`, acorda com uma tarefa ou o timeout, e repete até ser
   desligado. Cada ida ao servidor tem seu próprio par
   `UsarCliente`/`SoltarCliente`, nunca um só cobrindo o laço inteiro — é o que

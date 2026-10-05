@@ -40,7 +40,8 @@ Em RESP2, fora do pub/sub, **o servidor só fala quando perguntado**. Então:
 - **Conexões de comando:** a própria thread chamadora escreve e lê, sob o lock da conexão.
   Zero threads extras, zero handoff, zero condvar.
 - **Conexões de assinante e de comando bloqueante:** aí sim, thread dedicada de leitura, e
-  o despacho de callback vai para o `RedisPool` (o thread pool herdado), no mesmo padrão dos
+  o despacho de callback iria para o pool de threads (o `RedisPool` herdado; o `PcPool` da
+  pascal-common-faa desde a F8, seção 50), no mesmo padrão dos
   work items da lib AMQP.
 
 Ou seja: a maior parte da complexidade de concorrência da lib AMQP simplesmente não
@@ -762,8 +763,8 @@ melhor do que a lib decidir sozinha um intervalo que serve para todo mundo.
 ## 39. O callback roda na thread de leitura, em ordem (M7)
 
 O `OnMessage` é chamado **na thread de leitura**, uma mensagem por vez, na ordem
-em que chegaram. A alternativa era despachar por `RedisPool` (o thread pool que
-a lib já tem) e ganhar vazão. Não foi escolhida:
+em que chegaram. A alternativa era despachar pelo pool de threads (o `RedisPool`
+da época, hoje o `PcPool` da pascal-common-faa) e ganhar vazão. Não foi escolhida:
 
 - **Ordem é o único compromisso que o pub/sub do Redis realmente cumpre.** Não
   há entrega garantida, não há confirmação, não há repetição — mas o que chega,
@@ -1068,6 +1069,91 @@ miolo do sample é o padrão e não o setup, e os arquivos ficam bem menores que
 da AMQP), e **`TRedisClient` é compartilhável entre threads**, porque ele é o
 pool — é o que deixa dois workers concorrentes dividirem um cliente só no
 `FilaTarefasVcl`, sem nenhuma cerimônia.
+
+---
+
+## 50. A concorrência vem da pascal-common-faa (F8, 2026-10-04)
+
+A `Redis.Threading` era cópia renomeada da `AMQP.Threading`, e a pascal-named-pipes-faa
+carregava outra cópia da mesma origem. As três foram medidas idênticas linha a linha e
+unificadas na **pascal-common-faa** (`../pascal-common-faa`, MIT, mesmo autor); esta lib
+migrou na fase F8 do plano dela, a última das três. O mapa de nomes, sem alias:
+`RedisAtomic*` → `PcAtomic*`, `RedisTickMs` → `PcTickMs`, `TRedisMonitor` → `TPcMonitor`,
+`TRedisWorkItem` → `TPcWorkItem`, `TRedisThreadPool` → `TPcThreadPool`, `RedisPool` →
+`PcPool`, `REDIS_WAIT_INFINITE` → `PC_WAIT_INFINITE`. `TRedisPool` é o pool de
+**conexões** e não mudou.
+
+1. **A `Redis.Threading` sumiu, em vez de ficar como casca.** Tudo o que ela tinha foi
+   para a pascal-common-faa; não sobrou nada próprio, ao contrário da `AMQP.Threading`, que
+   ficou com o `AmqpWallMs`. Uma unit vazia mantida só para a checagem de versão seria uma
+   unit que ninguém usa por outro motivo — e que alguém apagaria um dia.
+2. **A checagem de versão mínima mora na `Redis.Types`**, logo depois do `uses` que traz
+   `PascalCommon.Version`. É a base de toda unit de protocolo, inclusive das duas únicas
+   que consomem a pascal-common-faa (`Redis.Pool`: monitor e relógio; `Redis.PubSub`: idem),
+   então é compilada antes de qualquer `Pc*`: uma cópia velha para o build com a mensagem,
+   não com "identificador não encontrado".
+3. **A dependência é por nome.** O `pascal_redis_faa.lpk` exige `pascal_common_faa` sem
+   `DefaultFilename`, com `MinVersion` 1: a aplicação fornece a cópia única. O submódulo
+   `external/pascal-common-faa` serve só a testes, samples e scripts, e os `.lpi` deles o
+   apontam com `Prefer="True"`.
+4. **Nenhum código da lib usa o pool de threads.** O que a lib usa da pascal-common-faa é o
+   monitor e o relógio; o pub/sub tem thread de leitura própria e roda o callback nela
+   (seção 39). Quem enfileira no `PcPool` são três samples GUI. Por isso não há objeto da
+   lib com trabalho no pool para esperar numa finalização.
+5. **O monitor tem o mesmo contrato.** Os corpos de `Wait`/`PulseAll` foram comparados com
+   os nomes normalizados: idênticos. Os três `Wait` da lib (dois na `Redis.PubSub`, um na
+   `Redis.Pool`) já re-checam a condição sob o lock, em laço e com prazo, então acordar sem
+   motivo continua inofensivo.
+6. **Não há contador de 64 bits na lib.** Nenhum `RedisAtomic*` era usado fora da própria
+   unit; a dúvida do overload (`Int64` × `UInt64`) não se aplica.
+
+**O que mudou de comportamento: nada medido.** O `PcPool` é **um** pool para o processo
+inteiro, dividido com qualquer outra lib que o use, e é criado na inicialização da
+pascal-common-faa (o `RedisPool` era preguiçoso). O `Destroy` de um `TPcThreadPool`
+**executa** a fila inteira antes de voltar — o do `RedisPool` também executava — e só
+libera sem rodar o item enfileirado depois de o `Destroy` começar.
+
+**O que a migração revelou nos samples GUI (anterior a ela).** Uma sonda com o mesmo
+`uses` dos samples mostrou, no FPC/LCL, a form sendo destruída **antes da primeira
+finalização de unit**, e itens do pool que ainda dormiam rodando depois disso
+(`form viva = False`). O mecanismo está na fonte das duas bibliotecas de UI: a LCL
+registra `AddExitProc(@BeforeFinalization)` no `TApplication.Create`, e a VCL
+`AddExitProc(DoneApplication)`, que chama `DestroyComponents`; exit procs rodam antes das
+finalizações. Então tanto o `RedisPool` (finalização da `Redis.Threading`) quanto o
+`PcPool` (finalização da `PascalCommon.ThreadPool`) executam as sobras **com a form já
+liberada** — a migração não piorou nem melhorou isso. Nos samples, o `FormCloseQuery`
+esperava as operações entre `UsarCliente` e `SoltarCliente`, mas não o item que ainda
+estava na fila nem o que estava fora dessa janela, e saía na hora quando não havia
+cliente (deixando de fora um `TConectarWork` abrindo um). Medido no `FilaTarefasVcl` (FPC,
+cópia instrumentada, consumidor dormindo 4 s no processamento quando a janela fecha): o
+`FormDestroy` vinha às 39.489 e o consumidor acordava às **42.137**, 2,6 s depois, para
+chamar `UsarCliente` numa form cujo `FLock` já tinha sido liberado. Silencioso: código de
+saída 0 e 0 vazamentos — a memória liberada ainda estava lá.
+
+**Corrigido junto com a migração**, com o padrão do `migrating.md` da pascal-common-faa:
+
+- **Base `TItemDaForm`** para os work items de cada sample: conta o item na form desde o
+  **enfileiramento** (o construtor roda na thread da UI, antes do `Queue`) e desconta no
+  **destrutor**, que roda também quando o pool libera o item sem executar e é o último
+  acesso do item à form.
+- **`FormCloseQuery` espera esse contador zerar** (teto de 10 s), com a form inteira viva e
+  sempre — com ou sem cliente. Enquanto espera, **bombeia** a fila do `TThread.Queue`
+  (`CheckSynchronize`): os marshals que os itens postam rodam ali, contra a form viva.
+  Deixados para depois do laço de mensagens, ninguém mais os executaria, e no Delphi
+  virariam vazamento — o `DoneThreadSynchronization` da RTL não libera o que sobra na fila.
+  Depois da espera, os timers são desligados de novo (um marshal pode ter religado a
+  amostragem) e o cliente é liberado, inclusive o que um `TConectarWork` tenha aberto ali.
+- **`FormDestroy` espera de novo, sem bombear**, antes de liberar o `FLock` e o cliente: é
+  o caminho da form destruída sem passar pelo `FormCloseQuery`.
+- **Nada de worker lendo controle.** O `CacheAsideVcl` lia `edtAtraso.Text` de dentro do
+  `TConsultaWork`; no LCL isso vira `SendMessage` para a thread da UI, que na espera do
+  fechamento está parada — a leitura travaria até o teto. O atraso passou a ser lido na
+  hora de enfileirar. E os timers do concorrente e da renovação do `LockDistribuidoVcl`
+  passaram a recusar enfileirar com `FEncerrando`, como o da amostragem já fazia.
+
+Com a correção, o mesmo roteiro dá o consumidor acordando às 48.695 e o `FormDestroy` às
+48.705 — a form só sai depois dele. Os três samples abrem e fecham (com e sem conexão) com
+código 0 e 0 vazamentos de heaptrc.
 
 ---
 

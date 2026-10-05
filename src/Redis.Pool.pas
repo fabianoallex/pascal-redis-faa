@@ -45,7 +45,7 @@
      clients reached`), que e' a falha que derruba as outras aplicacoes que
      dividem o mesmo Redis.
 
-  Thread-safe. O estado interno anda sob um TRedisMonitor, e toda operacao de
+  Thread-safe. O estado interno anda sob um TPcMonitor, e toda operacao de
   rede (abrir conexao, PING de saude, fechar socket) acontece fora do lock. }
 
 {$I redis.inc}
@@ -55,7 +55,8 @@ interface
 uses
   SysUtils,
   Redis.Types,
-  Redis.Threading,
+  PascalCommon.Threading,
+  PascalCommon.ThreadPool,
   Redis.Connection;
 
 const
@@ -106,7 +107,7 @@ type
   private
     FParams: TRedisParams;
     FPoolParams: TRedisPoolParams;
-    FMonitor: TRedisMonitor;
+    FMonitor: TPcMonitor;
     FIdle: array of TRedisConnection;
     FIdleSince: array of UInt64;
     FIdleCount: Integer;
@@ -198,7 +199,7 @@ begin
     FPoolParams.MaxSize := 1;
   if FPoolParams.AcquireTimeoutMs < 0 then
     FPoolParams.AcquireTimeoutMs := 0;
-  FMonitor := TRedisMonitor.Create;
+  FMonitor := TPcMonitor.Create;
 end;
 
 destructor TRedisPool.Destroy;
@@ -220,7 +221,7 @@ begin
     SetLength(FIdleSince, FIdleCount + 8);
   end;
   FIdle[FIdleCount] := AConnection;
-  FIdleSince[FIdleCount] := RedisTickMs;
+  FIdleSince[FIdleCount] := PcTickMs;
   Inc(FIdleCount);
 end;
 
@@ -237,7 +238,7 @@ begin
   // como o pool encolhe sozinho depois de um pico.
   Dec(FIdleCount);
   Result := FIdle[FIdleCount];
-  AIdleMs := RedisTickMs - FIdleSince[FIdleCount];
+  AIdleMs := PcTickMs - FIdleSince[FIdleCount];
   FIdle[FIdleCount] := nil;
 end;
 
@@ -267,7 +268,7 @@ var
   LCreate, LCheck, LSaudavel: Boolean;
   LWaitMs: UInt64;
 begin
-  LDeadline := RedisTickMs + UInt64(FPoolParams.AcquireTimeoutMs);
+  LDeadline := PcTickMs + UInt64(FPoolParams.AcquireTimeoutMs);
   while True do
   begin
     LConn := nil;
@@ -310,7 +311,7 @@ begin
         else
         begin
           // 3. No teto: espera devolucao ate' o prazo.
-          LNow := RedisTickMs;
+          LNow := PcTickMs;
           if LNow >= LDeadline then
             raise ERedisPoolExhausted.CreateFmt(
               'o pool chegou ao teto de %d conexoes e nenhuma foi devolvida ' +

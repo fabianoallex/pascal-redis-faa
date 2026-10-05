@@ -39,7 +39,7 @@ unit uFilaTarefasMain;
   thread, marshal descartavel + TThread.Queue, cliente contado por
   UsarCliente/SoltarCliente -- ver o cabecalho de uCacheAsideMain.pas). A
   novidade aqui e' que cada consumidor e' um LACO PERSISTENTE num worker do
-  RedisPool, nao uma operacao unica: ele fica bloqueado em XReadGroupBlocking,
+  PcPool, nao uma operacao unica: ele fica bloqueado em XReadGroupBlocking,
   acorda com uma tarefa ou com o timeout, e repete ate' ser desligado. Cada
   ida ao servidor (o XReadGroupBlocking, o XAck) tem seu PROPRIO
   UsarCliente/SoltarCliente -- nunca um so' abrangendo o laco inteiro --
@@ -62,7 +62,8 @@ uses
   {$ENDIF}
   SysUtils, Classes, SyncObjs,
   Graphics, Controls, Forms, Dialogs, StdCtrls, ExtCtrls,
-  Redis.Types, Redis.Threading, Redis.Transport, Redis.Client,
+  Redis.Types, PascalCommon.Threading, PascalCommon.ThreadPool,
+  Redis.Transport, Redis.Client,
   Redis.Commands, Redis.Commands.Streams;
 
 type
@@ -136,6 +137,7 @@ type
     FLock: TCriticalSection;
     FClient: TRedisClient;
     FEmVoo: Integer;
+    FItensVivos: Integer;    // work items vivos, desde o enfileiramento (TItemDaForm)
     FEncerrando: Boolean;
     FAmostraEmVoo: Boolean;
     FLigadoA, FLigadoB: Boolean;
@@ -149,6 +151,9 @@ type
     function LeParams(out AParams: TRedisParams): Boolean;
     function ChaveFila: string;
     function AtrasoEscolhido(AEdit: TEdit): Integer;
+    /// Espera os work items vivos (TItemDaForm) ate' o teto; ABombeia roda os
+    /// marshals que eles postam enquanto isso (so' com a form inteira viva).
+    procedure EsperaItens(ATetoMs: Integer; ABombeia: Boolean);
   public
     { --- Chamados pelos workers, sempre pela thread da UI (via marshal) --- }
     procedure Log(const ATexto: string);
@@ -285,39 +290,53 @@ begin
 end;
 
 { ---------------------------------------------------------------------------
-  Work items: rodam num worker do RedisPool (threads persistentes).
+  Work items: rodam num worker do PcPool (threads persistentes).
   --------------------------------------------------------------------------- }
 
 type
-  TConectarWork = class(TRedisWorkItem)
-  private
+  { Base dos work items: conta o item na form desde o ENFILEIRAMENTO -- o
+    construtor roda na thread da UI, antes do PcPool.Queue -- ate' o DESTRUTOR,
+    que roda tambem quando o pool libera o item sem executar e e' o ultimo
+    acesso do item a' form. O fechamento espera esse contador zerar (ver
+    FormCloseQuery): contar so' de UsarCliente a SoltarCliente deixava de fora
+    o item ainda na fila e o que esta' fora dessa janela, e eles rodariam
+    depois de a form ser liberada -- a LCL e a VCL liberam as forms num exit
+    proc, ANTES de qualquer finalizacao de unit, inclusive a que libera o
+    PcPool. E' o padrao do docs/migrating.md da pascal-common-faa. }
+  TItemDaForm = class(TPcWorkItem)
+  protected
     FForm: TfrmFilaTarefas;
+  public
+    constructor Create(AForm: TfrmFilaTarefas);
+    destructor Destroy; override;
+  end;
+
+type
+  TConectarWork = class(TItemDaForm)
+  private
     FParams: TRedisParams;
   public
     constructor Create(AForm: TfrmFilaTarefas; const AParams: TRedisParams);
     procedure Execute; override;
   end;
 
-  TDesconectarWork = class(TRedisWorkItem)
+  TDesconectarWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
   public
     constructor Create(AForm: TfrmFilaTarefas);
     procedure Execute; override;
   end;
 
-  TCriarFilaWork = class(TRedisWorkItem)
+  TCriarFilaWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
     FChave: string;
   public
     constructor Create(AForm: TfrmFilaTarefas; const AChave: string);
     procedure Execute; override;
   end;
 
-  TAdicionarWork = class(TRedisWorkItem)
+  TAdicionarWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
     FChave: string;
     FDescricao: string;
   public
@@ -328,9 +347,8 @@ type
   { Laco PERSISTENTE: fica rodando ate' ser desligado (checkbox) ou morrer
     (botao Matar). Ver o comentario de cabecalho da unit sobre por que cada
     ida ao servidor tem seu proprio UsarCliente/SoltarCliente. }
-  TConsumidorWork = class(TRedisWorkItem)
+  TConsumidorWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
     FNome: string;
     FChave: string;
     FAtrasoMs: Integer;
@@ -340,9 +358,8 @@ type
     procedure Execute; override;
   end;
 
-  TReivindicarWork = class(TRedisWorkItem)
+  TReivindicarWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
     FChave: string;
     FMinIdleMs: Int64;
   public
@@ -357,9 +374,8 @@ type
     XAUTOCLAIM/XCLAIM purgam a entrada apagada sozinhos no Redis 7+ (ver
     TReivindicarWork), mas reler a PEL diretamente ainda mostra o id com os
     campos nulos. }
-  TRetomarWork = class(TRedisWorkItem)
+  TRetomarWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
     FChave: string;
     FConsumidor: string;
   public
@@ -367,9 +383,8 @@ type
     procedure Execute; override;
   end;
 
-  TApagarAbandonadaWork = class(TRedisWorkItem)
+  TApagarAbandonadaWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
     FChave: string;
     FId: string;
   public
@@ -377,22 +392,35 @@ type
     procedure Execute; override;
   end;
 
-  TAmostraWork = class(TRedisWorkItem)
+  TAmostraWork = class(TItemDaForm)
   private
-    FForm: TfrmFilaTarefas;
     FChave: string;
   public
     constructor Create(AForm: TfrmFilaTarefas; const AChave: string);
     procedure Execute; override;
   end;
 
+{ TItemDaForm }
+
+constructor TItemDaForm.Create(AForm: TfrmFilaTarefas);
+begin
+  inherited Create;
+  FForm := AForm;
+  PcAtomicInc(FForm.FItensVivos);
+end;
+
+destructor TItemDaForm.Destroy;
+begin
+  PcAtomicDec(FForm.FItensVivos);
+  inherited;
+end;
+
 { TConectarWork }
 
 constructor TConectarWork.Create(AForm: TfrmFilaTarefas;
   const AParams: TRedisParams);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FParams := AParams;
 end;
 
@@ -429,8 +457,7 @@ end;
 
 constructor TDesconectarWork.Create(AForm: TfrmFilaTarefas);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
 end;
 
 procedure TDesconectarWork.Execute;
@@ -476,8 +503,7 @@ end;
 
 constructor TCriarFilaWork.Create(AForm: TfrmFilaTarefas; const AChave: string);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
 end;
 
@@ -514,8 +540,7 @@ end;
 constructor TAdicionarWork.Create(AForm: TfrmFilaTarefas;
   const AChave, ADescricao: string);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
   FDescricao := ADescricao;
 end;
@@ -548,8 +573,7 @@ end;
 constructor TConsumidorWork.Create(AForm: TfrmFilaTarefas;
   const ANome, AChave: string; AAtrasoMs: Integer);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FNome := ANome;
   FChave := AChave;
   FAtrasoMs := AAtrasoMs;
@@ -641,8 +665,7 @@ end;
 constructor TReivindicarWork.Create(AForm: TfrmFilaTarefas; const AChave: string;
   AMinIdleMs: Int64);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
   FMinIdleMs := AMinIdleMs;
 end;
@@ -702,8 +725,7 @@ end;
 constructor TRetomarWork.Create(AForm: TfrmFilaTarefas;
   const AChave, AConsumidor: string);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
   FConsumidor := AConsumidor;
 end;
@@ -757,8 +779,7 @@ end;
 constructor TApagarAbandonadaWork.Create(AForm: TfrmFilaTarefas;
   const AChave, AId: string);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
   FId := AId;
 end;
@@ -796,8 +817,7 @@ end;
 
 constructor TAmostraWork.Create(AForm: TfrmFilaTarefas; const AChave: string);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FChave := AChave;
 end;
 
@@ -855,7 +875,6 @@ end;
 procedure TfrmFilaTarefas.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
 var
   LClient: TRedisClient;
-  LEspera: Integer;
 begin
   CanClose := True;
   tmrAmostra.Enabled := False;
@@ -863,43 +882,55 @@ begin
   FLock.Enter;
   try
     FEncerrando := True;
-    LClient := FClient;
   finally
     FLock.Leave;
   end;
-  if LClient = nil then
-    Exit;
 
-  // Mesma logica dos outros samples: espera na propria thread da UI porque a
-  // janela ja' esta' indo embora, com teto para nao pendurar a aplicacao. Os
-  // consumidores notam FEncerrando e terminam sozinhos (o mais tardar depois
-  // de um BLOCK_MS), entao o teto precisa ser folgado o bastante para isso.
-  LEspera := 0;
-  while LEspera < 500 do
-  begin
-    FLock.Enter;
-    try
-      if FEmVoo = 0 then
-        Break;
-    finally
-      FLock.Leave;
-    end;
-    Sleep(10);
-    Inc(LEspera);
-  end;
+  // Mesma logica dos outros samples (ver o comentario no CacheAsideVcl): espera
+  // TODOS os work items, com a form inteira viva e bombeando os marshals que
+  // eles postam. Aqui isso importa mais: o consumidor e' um laco, e entre uma
+  // ida ao servidor e outra ele dorme o atraso do processamento FORA de
+  // UsarCliente -- contar so' as operacoes no ar o deixava acordar depois de a
+  // form ser liberada. Com FEncerrando ligado ele para sozinho, o mais tardar
+  // depois de um BLOCK_MS mais o atraso; o teto e' folgado para isso.
+  EsperaItens(10000, True);
+  tmrAmostra.Enabled := False;  // um marshal pode ter religado a amostragem
 
   FLock.Enter;
   try
+    LClient := FClient;
     FClient := nil;
   finally
     FLock.Leave;
   end;
-  LClient.Free;
+  LClient.Free;  // inclusive o que um TConectarWork tenha aberto na espera
 end;
 
 procedure TfrmFilaTarefas.FormDestroy(Sender: TObject);
 begin
+  // Normalmente o FormCloseQuery ja' esperou tudo; cobre a form destruida sem
+  // passar por ele. Sem bombear: marshal nenhum deve rodar contra esta form.
+  FLock.Enter;
+  try
+    FEncerrando := True;
+  finally
+    FLock.Leave;
+  end;
+  EsperaItens(10000, False);
+  FreeAndNil(FClient);
   FLock.Free;
+end;
+
+procedure TfrmFilaTarefas.EsperaItens(ATetoMs: Integer; ABombeia: Boolean);
+var
+  LPrazo: UInt64;
+begin
+  LPrazo := PcTickMs + UInt64(ATetoMs);
+  while (PcAtomicGet(FItensVivos) > 0) and (PcTickMs < LPrazo) do
+    if ABombeia then
+      CheckSynchronize(10)
+    else
+      Sleep(10);
 end;
 
 function TfrmFilaTarefas.UsarCliente(out AClient: TRedisClient): Boolean;
@@ -1046,7 +1077,7 @@ begin
     Exit;
   btnConectar.Enabled := False;
   lblStatus.Caption := 'Conectando...';
-  RedisPool.Queue(TConectarWork.Create(Self, LParams));
+  PcPool.Queue(TConectarWork.Create(Self, LParams));
 end;
 
 procedure TfrmFilaTarefas.btnDesconectarClick(Sender: TObject);
@@ -1054,7 +1085,7 @@ begin
   btnDesconectar.Enabled := False;
   tmrAmostra.Enabled := False;
   lblStatus.Caption := 'Encerrando as operacoes em voo...';
-  RedisPool.Queue(TDesconectarWork.Create(Self));
+  PcPool.Queue(TDesconectarWork.Create(Self));
 end;
 
 procedure TfrmFilaTarefas.ConexaoAberta(const AInfo: string);
@@ -1106,7 +1137,7 @@ end;
 
 procedure TfrmFilaTarefas.btnCriarFilaClick(Sender: TObject);
 begin
-  RedisPool.Queue(TCriarFilaWork.Create(Self, ChaveFila));
+  PcPool.Queue(TCriarFilaWork.Create(Self, ChaveFila));
 end;
 
 procedure TfrmFilaTarefas.btnAdicionarClick(Sender: TObject);
@@ -1117,7 +1148,7 @@ begin
   if LTexto = '' then
     LTexto := 'pedido';
   Inc(FContador);
-  RedisPool.Queue(TAdicionarWork.Create(Self, ChaveFila,
+  PcPool.Queue(TAdicionarWork.Create(Self, ChaveFila,
     LTexto + ' #' + IntToStr(FContador)));
 end;
 
@@ -1132,7 +1163,7 @@ begin
   for I := 1 to 5 do
   begin
     Inc(FContador);
-    RedisPool.Queue(TAdicionarWork.Create(Self, ChaveFila,
+    PcPool.Queue(TAdicionarWork.Create(Self, ChaveFila,
       LTexto + ' #' + IntToStr(FContador)));
   end;
 end;
@@ -1156,7 +1187,7 @@ begin
     begin
       Log('Consumidor A ligado');
       lblStatusA.Caption := 'Status: rodando';
-      RedisPool.Queue(TConsumidorWork.Create(Self, 'A', ChaveFila,
+      PcPool.Queue(TConsumidorWork.Create(Self, 'A', ChaveFila,
         AtrasoEscolhido(edtAtrasoA)));
     end;
   end
@@ -1192,7 +1223,7 @@ begin
     begin
       Log('Consumidor B ligado');
       lblStatusB.Caption := 'Status: rodando';
-      RedisPool.Queue(TConsumidorWork.Create(Self, 'B', ChaveFila,
+      PcPool.Queue(TConsumidorWork.Create(Self, 'B', ChaveFila,
         AtrasoEscolhido(edtAtrasoB)));
     end;
   end
@@ -1299,7 +1330,7 @@ begin
   LMinIdle := StrToIntDef(Trim(edtIdleMin.Text), 3000);
   if LMinIdle < 0 then
     LMinIdle := 0;
-  RedisPool.Queue(TReivindicarWork.Create(Self, ChaveFila, LMinIdle));
+  PcPool.Queue(TReivindicarWork.Create(Self, ChaveFila, LMinIdle));
 end;
 
 procedure TfrmFilaTarefas.btnApagarAbandonadaClick(Sender: TObject);
@@ -1310,7 +1341,7 @@ begin
       'adicione uma tarefa e clique Matar antes dele confirmar.');
     Exit;
   end;
-  RedisPool.Queue(TApagarAbandonadaWork.Create(Self, ChaveFila,
+  PcPool.Queue(TApagarAbandonadaWork.Create(Self, ChaveFila,
     FUltimoAbandonadoId));
   FUltimoAbandonadoId := '';
 end;
@@ -1323,7 +1354,7 @@ begin
       'tarefa e clique Matar antes dele confirmar.');
     Exit;
   end;
-  RedisPool.Queue(TRetomarWork.Create(Self, ChaveFila,
+  PcPool.Queue(TRetomarWork.Create(Self, ChaveFila,
     FUltimoAbandonadoConsumidor));
 end;
 
@@ -1341,7 +1372,7 @@ begin
   end;
   if LOcupado then
     Exit;
-  RedisPool.Queue(TAmostraWork.Create(Self, ChaveFila));
+  PcPool.Queue(TAmostraWork.Create(Self, ChaveFila));
 end;
 
 procedure TfrmFilaTarefas.MostraAmostra(ATamanho, APendCount: Int64;

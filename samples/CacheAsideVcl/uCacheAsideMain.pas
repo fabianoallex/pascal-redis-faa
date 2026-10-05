@@ -32,8 +32,8 @@
     pub/sub o servidor so' fala quando perguntado, entao quem chama
     Strings.Get BLOQUEIA a propria thread ate' a resposta chegar. Chamar da
     thread da UI congela a janela — e justo quando o servidor esta' lento, que
-    e' quando alguem esta' olhando. Toda operacao aqui e' um TRedisWorkItem
-    enfileirado no RedisPool.
+    e' quando alguem esta' olhando. Toda operacao aqui e' um TPcWorkItem
+    enfileirado no PcPool.
   - **Volta para a UI por marshal descartavel + TThread.Queue.** O FPC nao tem
     o overload de closure anonima do TThread.Queue, entao cada resultado vira
     um objetinho com os dados da chamada e um Execute que chama o metodo da
@@ -61,7 +61,8 @@ uses
   {$ENDIF}
   SysUtils, Classes, SyncObjs,
   Graphics, Controls, Forms, Dialogs, StdCtrls, ComCtrls, ExtCtrls,
-  Redis.Types, Redis.Threading, Redis.Transport, Redis.Client,
+  Redis.Types, PascalCommon.Threading, PascalCommon.ThreadPool,
+  Redis.Transport, Redis.Client,
   Redis.Commands.Strings;
 
 type
@@ -132,6 +133,7 @@ type
     FLock: TCriticalSection;
     FClient: TRedisClient;
     FEmVoo: Integer;
+    FItensVivos: Integer;    // work items vivos, desde o enfileiramento (TItemDaForm)
     FEncerrando: Boolean;
     FAmostraEmVoo: Boolean;
     FHits: Integer;
@@ -143,6 +145,9 @@ type
     procedure Regrava(APreservaTtl: Boolean);
     procedure Invalida(AUnlink: Boolean);
     procedure Aquece(AComJitter: Boolean);
+    /// Espera os work items vivos (TItemDaForm) ate' o teto; ABombeia roda os
+    /// marshals que eles postam enquanto isso (so' com a form inteira viva).
+    procedure EsperaItens(ATetoMs: Integer; ABombeia: Boolean);
   public
     { --- Chamados pelos workers, sempre pela thread da UI (via marshal) --- }
     procedure Log(const ATexto: string);
@@ -162,6 +167,9 @@ type
     function ChaveDe(const ACodigo: string): string;
     function ChaveLote(AIndice: Integer): string;
     function CodigoAtual: string;
+    /// Le' o edtAtraso: so' na thread da UI, na hora de enfileirar. Lido de um
+    /// worker, no LCL vira SendMessage para a thread da UI -- que no fechamento
+    /// esta' parada esperando os itens, e a leitura travaria ate' o teto.
     function AtrasoDaFonte: Integer;
   end;
 
@@ -272,45 +280,60 @@ begin
 end;
 
 { ---------------------------------------------------------------------------
-  Work items: rodam num worker do RedisPool (threads persistentes).
+  Work items: rodam num worker do PcPool (threads persistentes).
   --------------------------------------------------------------------------- }
 
 type
-  TConectarWork = class(TRedisWorkItem)
-  private
+  { Base dos work items: conta o item na form desde o ENFILEIRAMENTO -- o
+    construtor roda na thread da UI, antes do PcPool.Queue -- ate' o DESTRUTOR,
+    que roda tambem quando o pool libera o item sem executar e e' o ultimo
+    acesso do item a' form. O fechamento espera esse contador zerar (ver
+    FormCloseQuery): contar so' de UsarCliente a SoltarCliente deixava de fora
+    o item ainda na fila e o que esta' fora dessa janela, e eles rodariam
+    depois de a form ser liberada -- a LCL e a VCL liberam as forms num exit
+    proc, ANTES de qualquer finalizacao de unit, inclusive a que libera o
+    PcPool. E' o padrao do docs/migrating.md da pascal-common-faa. }
+  TItemDaForm = class(TPcWorkItem)
+  protected
     FForm: TfrmCacheAside;
+  public
+    constructor Create(AForm: TfrmCacheAside);
+    destructor Destroy; override;
+  end;
+
+type
+  TConectarWork = class(TItemDaForm)
+  private
     FParams: TRedisParams;
   public
     constructor Create(AForm: TfrmCacheAside; const AParams: TRedisParams);
     procedure Execute; override;
   end;
 
-  TDesconectarWork = class(TRedisWorkItem)
+  TDesconectarWork = class(TItemDaForm)
   private
-    FForm: TfrmCacheAside;
   public
     constructor Create(AForm: TfrmCacheAside);
     procedure Execute; override;
   end;
 
-  TConsultaWork = class(TRedisWorkItem)
+  TConsultaWork = class(TItemDaForm)
   private
-    FForm: TfrmCacheAside;
     FCodigo: string;
     FTtl: Integer;
     FJitter: Boolean;
     FRotulo: string;
+    FAtrasoMs: Integer;
   public
     constructor Create(AForm: TfrmCacheAside; const ACodigo: string;
-      ATtl: Integer; AJitter: Boolean; const ARotulo: string);
+      ATtl: Integer; AJitter: Boolean; const ARotulo: string; AAtrasoMs: Integer);
     procedure Execute; override;
   end;
 
   TOperacaoChave = (okRegravaSemTtl, okRegravaKeepTtl, okDel, okUnlink);
 
-  TChaveWork = class(TRedisWorkItem)
+  TChaveWork = class(TItemDaForm)
   private
-    FForm: TfrmCacheAside;
     FCodigo: string;
     FOperacao: TOperacaoChave;
   public
@@ -319,9 +342,8 @@ type
     procedure Execute; override;
   end;
 
-  TAquecerWork = class(TRedisWorkItem)
+  TAquecerWork = class(TItemDaForm)
   private
-    FForm: TfrmCacheAside;
     FTtl: Integer;
     FJitter: Boolean;
   public
@@ -329,9 +351,8 @@ type
     procedure Execute; override;
   end;
 
-  TAmostraWork = class(TRedisWorkItem)
+  TAmostraWork = class(TItemDaForm)
   private
-    FForm: TfrmCacheAside;
     FCodigo: string;
   public
     constructor Create(AForm: TfrmCacheAside; const ACodigo: string);
@@ -364,13 +385,27 @@ begin
     FormatDateTime('hh:nn:ss', Now);
 end;
 
+{ TItemDaForm }
+
+constructor TItemDaForm.Create(AForm: TfrmCacheAside);
+begin
+  inherited Create;
+  FForm := AForm;
+  PcAtomicInc(FForm.FItensVivos);
+end;
+
+destructor TItemDaForm.Destroy;
+begin
+  PcAtomicDec(FForm.FItensVivos);
+  inherited;
+end;
+
 { TConectarWork }
 
 constructor TConectarWork.Create(AForm: TfrmCacheAside;
   const AParams: TRedisParams);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FParams := AParams;
 end;
 
@@ -406,8 +441,7 @@ end;
 
 constructor TDesconectarWork.Create(AForm: TfrmCacheAside);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
 end;
 
 procedure TDesconectarWork.Execute;
@@ -450,10 +484,10 @@ end;
 { TConsultaWork }
 
 constructor TConsultaWork.Create(AForm: TfrmCacheAside; const ACodigo: string;
-  ATtl: Integer; AJitter: Boolean; const ARotulo: string);
+  ATtl: Integer; AJitter: Boolean; const ARotulo: string; AAtrasoMs: Integer);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
+  FAtrasoMs := AAtrasoMs;
   FCodigo := ACodigo;
   FTtl := ATtl;
   FJitter := AJitter;
@@ -481,7 +515,7 @@ begin
   end;
 
   LChave := FForm.ChaveDe(FCodigo);
-  LInicio := RedisTickMs;
+  LInicio := PcTickMs;
   LOrigem := ocErro;
   LValor := '';
   try
@@ -496,7 +530,7 @@ begin
       begin
         LOrigem := ocFonte;
         PostaLog(FForm, FRotulo + 'MISS ' + LChave + ' -> consultando a fonte');
-        LValor := ConsultaFonteLenta(FCodigo, FForm.AtrasoDaFonte);
+        LValor := ConsultaFonteLenta(FCodigo, FAtrasoMs);
         LPrazo := TtlEfetivo(FTtl, FJitter);
         LOpcoes := RedisDefaultSetOptions;
         LOpcoes.Expiry := seSeconds;
@@ -519,7 +553,7 @@ begin
 
   LMarshal.Valor := LValor;
   LMarshal.Origem := LOrigem;
-  LMarshal.Ms := Int64(RedisTickMs - LInicio);
+  LMarshal.Ms := Int64(PcTickMs - LInicio);
   TThread.Queue(nil, LMarshal.Execute);
 end;
 
@@ -528,8 +562,7 @@ end;
 constructor TChaveWork.Create(AForm: TfrmCacheAside; const ACodigo: string;
   AOperacao: TOperacaoChave);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FCodigo := ACodigo;
   FOperacao := AOperacao;
 end;
@@ -591,8 +624,7 @@ end;
 constructor TAquecerWork.Create(AForm: TfrmCacheAside; ATtl: Integer;
   AJitter: Boolean);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FTtl := ATtl;
   FJitter := AJitter;
 end;
@@ -645,8 +677,7 @@ end;
 
 constructor TAmostraWork.Create(AForm: TfrmCacheAside; const ACodigo: string);
 begin
-  inherited Create;
-  FForm := AForm;
+  inherited Create(AForm);
   FCodigo := ACodigo;
 end;
 
@@ -704,7 +735,6 @@ end;
 procedure TfrmCacheAside.FormCloseQuery(Sender: TObject; var CanClose: Boolean);
 var
   LClient: TRedisClient;
-  LEspera: Integer;
 begin
   CanClose := True;
   tmrAmostra.Enabled := False;
@@ -712,42 +742,58 @@ begin
   FLock.Enter;
   try
     FEncerrando := True;
-    LClient := FClient;
   finally
     FLock.Leave;
   end;
-  if LClient = nil then
-    Exit;
 
-  // No fechamento a espera e' na propria thread da UI, de proposito: a janela
-  // ja' esta' indo embora e o que importa e' nao destruir o cliente por baixo
-  // de um worker. Teto de 5 s para nao pendurar a aplicacao.
-  LEspera := 0;
-  while LEspera < 500 do
-  begin
-    FLock.Enter;
-    try
-      if FEmVoo = 0 then
-        Break;
-    finally
-      FLock.Leave;
-    end;
-    Sleep(10);
-    Inc(LEspera);
-  end;
+  // Espera TODOS os work items, com a form inteira viva: os que ainda estao na
+  // fila, os que estao no ar e os que estao entre uma ida ao servidor e outra
+  // -- inclusive sem conexao, porque um TConectarWork pode estar abrindo uma.
+  // Com FEncerrando ligado eles terminam sozinhos (UsarCliente recusa). A
+  // espera e' na thread da UI de proposito, e BOMBEIA a fila do TThread.Queue:
+  // os marshals que os itens postam rodam aqui, contra a form viva. Deixados
+  // para depois do laco de mensagens, ninguem mais os executaria -- e no
+  // Delphi viram vazamento, porque a RTL nao libera o que sobra na fila.
+  // Teto de 10 s para nao pendurar a aplicacao.
+  EsperaItens(10000, True);
+  tmrAmostra.Enabled := False;  // um marshal pode ter religado a amostragem
 
   FLock.Enter;
   try
+    LClient := FClient;
     FClient := nil;
   finally
     FLock.Leave;
   end;
-  LClient.Free;
+  LClient.Free;  // inclusive o que um TConectarWork tenha aberto na espera
 end;
 
 procedure TfrmCacheAside.FormDestroy(Sender: TObject);
 begin
+  // Normalmente o FormCloseQuery ja' esperou tudo e isto volta na hora; cobre a
+  // form destruida sem passar por ele. Aqui SEM bombear: a form ja' esta' sendo
+  // destruida, e marshal nenhum deve rodar contra ela.
+  FLock.Enter;
+  try
+    FEncerrando := True;
+  finally
+    FLock.Leave;
+  end;
+  EsperaItens(10000, False);
+  FreeAndNil(FClient);
   FLock.Free;
+end;
+
+procedure TfrmCacheAside.EsperaItens(ATetoMs: Integer; ABombeia: Boolean);
+var
+  LPrazo: UInt64;
+begin
+  LPrazo := PcTickMs + UInt64(ATetoMs);
+  while (PcAtomicGet(FItensVivos) > 0) and (PcTickMs < LPrazo) do
+    if ABombeia then
+      CheckSynchronize(10)
+    else
+      Sleep(10);
 end;
 
 function TfrmCacheAside.UsarCliente(out AClient: TRedisClient): Boolean;
@@ -894,7 +940,7 @@ begin
     Exit;
   btnConectar.Enabled := False;
   lblStatus.Caption := 'Conectando...';
-  RedisPool.Queue(TConectarWork.Create(Self, LParams));
+  PcPool.Queue(TConectarWork.Create(Self, LParams));
 end;
 
 procedure TfrmCacheAside.btnDesconectarClick(Sender: TObject);
@@ -902,7 +948,7 @@ begin
   btnDesconectar.Enabled := False;
   tmrAmostra.Enabled := False;
   lblStatus.Caption := 'Encerrando as operacoes em voo...';
-  RedisPool.Queue(TDesconectarWork.Create(Self));
+  PcPool.Queue(TDesconectarWork.Create(Self));
 end;
 
 procedure TfrmCacheAside.ConexaoAberta(const AInfo: string);
@@ -935,8 +981,8 @@ end;
 
 procedure TfrmCacheAside.btnConsultarClick(Sender: TObject);
 begin
-  RedisPool.Queue(TConsultaWork.Create(Self, CodigoAtual, TtlEscolhido,
-    chkJitter.Checked, ''));
+  PcPool.Queue(TConsultaWork.Create(Self, CodigoAtual, TtlEscolhido,
+    chkJitter.Checked, '', AtrasoDaFonte));
 end;
 
 procedure TfrmCacheAside.btnConsultar5Click(Sender: TObject);
@@ -948,8 +994,8 @@ begin
   // cache-aside sozinho nao protege contra ela. O placar mostra 5 misses.
   Log('--- 5 consultas concorrentes na mesma chave ---');
   for I := 1 to 5 do
-    RedisPool.Queue(TConsultaWork.Create(Self, CodigoAtual, TtlEscolhido,
-      chkJitter.Checked, '[' + IntToStr(I) + '] '));
+    PcPool.Queue(TConsultaWork.Create(Self, CodigoAtual, TtlEscolhido,
+      chkJitter.Checked, '[' + IntToStr(I) + '] ', AtrasoDaFonte));
 end;
 
 procedure TfrmCacheAside.MostraConsulta(const AValor: string;
@@ -978,9 +1024,9 @@ end;
 procedure TfrmCacheAside.Regrava(APreservaTtl: Boolean);
 begin
   if APreservaTtl then
-    RedisPool.Queue(TChaveWork.Create(Self, CodigoAtual, okRegravaKeepTtl))
+    PcPool.Queue(TChaveWork.Create(Self, CodigoAtual, okRegravaKeepTtl))
   else
-    RedisPool.Queue(TChaveWork.Create(Self, CodigoAtual, okRegravaSemTtl));
+    PcPool.Queue(TChaveWork.Create(Self, CodigoAtual, okRegravaSemTtl));
 end;
 
 procedure TfrmCacheAside.btnRegravarSemClick(Sender: TObject);
@@ -996,9 +1042,9 @@ end;
 procedure TfrmCacheAside.Invalida(AUnlink: Boolean);
 begin
   if AUnlink then
-    RedisPool.Queue(TChaveWork.Create(Self, CodigoAtual, okUnlink))
+    PcPool.Queue(TChaveWork.Create(Self, CodigoAtual, okUnlink))
   else
-    RedisPool.Queue(TChaveWork.Create(Self, CodigoAtual, okDel));
+    PcPool.Queue(TChaveWork.Create(Self, CodigoAtual, okDel));
 end;
 
 procedure TfrmCacheAside.btnDelClick(Sender: TObject);
@@ -1018,7 +1064,7 @@ begin
   LTtl := StrToIntDef(Trim(edtLoteTtl.Text), 15);
   if LTtl < 2 then
     LTtl := 2;
-  RedisPool.Queue(TAquecerWork.Create(Self, LTtl, AComJitter));
+  PcPool.Queue(TAquecerWork.Create(Self, LTtl, AComJitter));
 end;
 
 procedure TfrmCacheAside.btnLoteFixoClick(Sender: TObject);
@@ -1043,7 +1089,7 @@ begin
   finally
     FLock.Leave;
   end;
-  RedisPool.Queue(TAmostraWork.Create(Self, CodigoAtual));
+  PcPool.Queue(TAmostraWork.Create(Self, CodigoAtual));
 end;
 
 procedure TfrmCacheAside.MostraAmostra(ATtl: Int64; ASobreviventes: Integer);
