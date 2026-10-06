@@ -66,7 +66,7 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
   for Windows — gotcha 3 da pascal-common-faa).
 - **A lib nunca embute a pascal-common-faa.** O `pascal_redis_faa.lpk` exige
   `pascal_common_faa` **só pelo nome**, com `MinVersion` 1: a aplicação fornece a cópia
-  única. O submódulo `external/pascal-common-faa` (tag `v1.1.0`, checkout **sem**
+  única. O submódulo `external/pascal-common-faa` (tag `v1.2.0`, checkout **sem**
   `--recursive`) existe para testes, samples e scripts. Os `.lpi` deles listam
   `pascal_common_faa` **primeiro**, com `DefaultFilename` em `external/` e `Prefer="True"`
   (sem o `Prefer`, um pacote registrado no IDE ganharia); os `.dproj` têm

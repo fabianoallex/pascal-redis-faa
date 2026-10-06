@@ -6,6 +6,15 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-05
+
+### Alterado
+
+- Submódulo `external/pascal-common-faa` (testes, samples e scripts) sobe de `v1.1.0` para
+  `v1.2.0`. A lib não usa o `PcProcessorCount` novo, então o mínimo exigido continua `1.0.0`
+  (`Redis.Types` e `MinVersion` do `.lpk` sem mudança). No Linux o `PcPool` pode chegar a
+  4 x núcleos threads em vez de 16; só os samples GUI o usam.
+
 ## [0.1.0] - 2026-10-04
 
 Primeira versão publicada. Cliente Redis (RESP2/RESP3) para Delphi 12 e FPC 3.2.2/Lazarus numa
@@ -68,5 +77,6 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/fabianoallex/pascal-redis-faa/releases/tag/v0.1.0
