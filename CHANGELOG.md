@@ -6,6 +6,14 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-05
+
+### Alterado
+
+- A versão mínima exigida da pascal-common-faa sobe de `1.0.0` para `1.2.0` (checagem na
+  `Redis.Types` e `MinVersion` do `.lpk`), alinhada à versão que as suítes e os samples
+  validam. Quem fornece uma cópia mais velha passa a ver a mensagem de erro na compilação.
+
 ## [0.1.1] - 2026-10-05
 
 ### Alterado
@@ -77,6 +85,7 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/fabianoallex/pascal-redis-faa/releases/tag/v0.1.0

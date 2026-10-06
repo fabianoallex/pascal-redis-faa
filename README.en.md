@@ -570,7 +570,7 @@ flattened map.
 ## Build
 
 **Dependency:** the library uses
-[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.0.0 or later**
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.2.0 or later**
 — the base shared by the `*-faa` libraries, which provides the monitor/condvar, the
 portable atomics, the monotonic clock and the thread pool (`TPcMonitor`, `PcAtomic*`,
 `PcTickMs`, `PcPool`). **Your application** provides the copy, a single one for every

@@ -30,8 +30,8 @@ uses
   SysUtils, Math,
   PascalCommon.Version;
 
-{$IF PASCALCOMMON_VERSION < 10000}
-  {$MESSAGE FATAL 'pascal-redis-faa precisa da pascal-common-faa 1.0.0 ou mais nova'}
+{$IF PASCALCOMMON_VERSION < 10200}
+  {$MESSAGE FATAL 'pascal-redis-faa precisa da pascal-common-faa 1.2.0 ou mais nova'}
 {$IFEND}
 
 const

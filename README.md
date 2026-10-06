@@ -559,7 +559,7 @@ servidor como mapa achatado.
 ## Build
 
 **Dependência:** a lib usa a
-[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.0.0 ou mais
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.2.0 ou mais
 nova** — a base compartilhada pelas libs `*-faa`, de onde vêm o monitor/condvar, os
 atomics portáveis, o relógio monotônico e o pool de threads (`TPcMonitor`, `PcAtomic*`,
 `PcTickMs`, `PcPool`). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
