@@ -34,6 +34,7 @@ uses
   System.SyncObjs,
   Redis.Types,
   PascalCommon.Threading,
+  PascalCommon.Tracing,
   Redis.Connection,
   Redis.Pool,
   Redis.Client,
@@ -52,6 +53,15 @@ uses
   Redis.DUnitXCompat;
 
 type
+  { Exportador que guarda os spans recebidos (fixture de tracing). }
+  TRedisSpanColetorIt = class(TInterfacedObject, IPcSpanExporter)
+  private
+    FSpans: TPcSpanDataArray;
+  public
+    function ExportSpans(const ASpans: TPcSpanDataArray; out AError: string): Boolean;
+    property Spans: TPcSpanDataArray read FSpans;
+  end;
+
   { Roda comandos pelo pool numa thread propria. Guarda o erro em vez de
     deixa-lo escapar: excecao em thread de teste some sem deixar rastro, e o
     que interessa e' o teste falhar com a mensagem certa. }
@@ -227,6 +237,12 @@ type
     [Test] procedure XClaim_MinIdleAlto_NaoRoubaTrabalhoEmAndamento;
     [Test] procedure EntradaApagada_ContinuaNaPelSemCampos;
     [Test] procedure XInfoGroups_EnxergaOGrupoEAPendencia;
+  end;
+
+  [TestFixture]
+  TRedisTracingIntegrationTests = class
+  public
+    [Test] procedure Cliente_UmSpanPorComandoNaTraceDaRequisicao;
   end;
 
 implementation
@@ -2873,6 +2889,91 @@ begin
   end;
 end;
 
+{ --- Fase D da observabilidade: spans por comando --- }
+
+function TRedisSpanColetorIt.ExportSpans(const ASpans: TPcSpanDataArray;
+  out AError: string): Boolean;
+var
+  I, LBase: Integer;
+begin
+  AError := '';
+  LBase := Length(FSpans);
+  SetLength(FSpans, LBase + Length(ASpans));
+  for I := 0 to High(ASpans) do
+    FSpans[LBase + I] := ASpans[I];
+  Result := True;
+end;
+
+function AtributoIt(const ASpan: TPcSpanData; const AKey: string): string;
+var
+  I: Integer;
+begin
+  Result := '<ausente>';
+  for I := 0 to High(ASpan.Attributes) do
+    if ASpan.Attributes[I].Key = AKey then
+    begin
+      if ASpan.Attributes[I].ValueType = satInt then
+        Result := IntToStr(ASpan.Attributes[I].IntValue)
+      else
+        Result := ASpan.Attributes[I].StringValue;
+      Exit;
+    end;
+end;
+
+procedure TRedisTracingIntegrationTests.Cliente_UmSpanPorComandoNaTraceDaRequisicao;
+var
+  LColetor: TRedisSpanColetorIt;
+  LRef: IPcSpanExporter;
+  LClient: TRedisClient;
+  LPai: IPcSpan;
+  LTraceId, LPaiId, LChaveLida, LValor, LNomes: string;
+  I: Integer;
+begin
+  // O caminho inteiro de uma aplicacao: fachada, pool, conexao de verdade e o
+  // pool separado dos bloqueantes. Cada comando vira um span filho do span
+  // corrente (o de servidor de uma requisicao HTTP, aqui simulado), e o
+  // handshake das conexoes novas e o health check nao aparecem.
+  LColetor := TRedisSpanColetorIt.Create;
+  LRef := LColetor;
+  TPcTracing.Start(TPcTracingOptions.Default('redis-it', '0'), LRef, False);
+  try
+    LClient := NovoCliente;
+    try
+      LPai := TPcTracing.StartSpan('GET /pedidos', skServer);
+      LTraceId := LPai.TraceId;
+      LPaiId := LPai.SpanId;
+      LClient.Strings.SetValue(Chave('tr:1'), 'segredo');
+      TAssert.AssertEquals('segredo', LClient.Strings.Get(Chave('tr:1')).AsString);
+      TAssert.AssertFalse('lista vazia: o BLPOP vence o prazo',
+        LClient.Lists.BLPop([Chave('tr:fila')], 0.2, LChaveLida, LValor));
+      LClient.Keys.Del(Chave('tr:1'));
+      LPai.Finish;
+      LPai := nil;
+    finally
+      LClient.Free;
+    end;
+    TPcTracing.FlushNow;
+
+    LNomes := '';
+    for I := 0 to High(LColetor.Spans) do
+      LNomes := LNomes + LColetor.Spans[I].Name + '|';
+    TAssert.AssertEquals('SET|GET|BLPOP|DEL|GET /pedidos|', LNomes);
+    for I := 0 to 3 do
+    begin
+      TAssert.AssertEquals(LTraceId, LColetor.Spans[I].TraceId);
+      TAssert.AssertEquals(LPaiId, LColetor.Spans[I].ParentSpanId);
+      TAssert.AssertTrue('sem erro', LColetor.Spans[I].Status = ssUnset);
+      TAssert.AssertEquals('redis', AtributoIt(LColetor.Spans[I], 'db.system.name'));
+    end;
+    TAssert.AssertEquals('o valor nao vai para o span', 'SET ' + Chave('tr:1') + ' ?',
+      AtributoIt(LColetor.Spans[0], 'db.query.text'));
+    TAssert.AssertEquals('BLPOP ' + Chave('tr:fila') + ' ?',
+      AtributoIt(LColetor.Spans[2], 'db.query.text'));
+  finally
+    TPcTracing.Shutdown;
+  end;
+end;
+
 initialization
   TDUnitX.RegisterTestFixture(TRedisConnectionIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisPoolIntegrationTests);
@@ -2887,5 +2988,6 @@ initialization
   TDUnitX.RegisterTestFixture(TRedisPubSubIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisScriptingIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisStreamsIntegrationTests);
+  TDUnitX.RegisterTestFixture(TRedisTracingIntegrationTests);
 
 end.

@@ -57,6 +57,7 @@ uses
   Redis.Types,
   PascalCommon.Threading,
   PascalCommon.ThreadPool,
+  PascalCommon.Tracing,
   Redis.Connection;
 
 const
@@ -120,6 +121,10 @@ type
     function PopIdle(out AIdleMs: UInt64): TRedisConnection;
     /// Devolve a vaga que uma conexao ocupava. Chamar SEGURANDO o lock.
     procedure GiveBackSlot;
+    /// O Acquire de fato. Abre o span de espera em AWaitSpan na primeira vez
+    /// que precisa esperar, e conta as esperas em AWaits.
+    function AcquireConnection(var AWaitSpan: IPcSpan;
+      var AWaits: Integer): TRedisConnection;
   protected
     /// Cria e ABRE uma conexao. Ponto de extensao: as suites unitarias
     /// sobrescrevem para devolver conexoes sobre um servidor falso em memoria,
@@ -173,6 +178,9 @@ type
 function RedisDefaultPoolParams: TRedisPoolParams;
 
 implementation
+
+uses
+  Redis.Tracing;
 
 function RedisDefaultPoolParams: TRedisPoolParams;
 begin
@@ -262,6 +270,29 @@ end;
 
 function TRedisPool.Acquire: TRedisConnection;
 var
+  LWaitSpan: IPcSpan;
+  LWaits: Integer;
+begin
+  // Span 'pool wait' (Redis.Tracing): so' quando houve espera de fato, da
+  // primeira espera ate' conseguir a conexao ou desistir. Termina aqui, na
+  // thread que o abriu.
+  LWaitSpan := nil;
+  LWaits := 0;
+  try
+    Result := AcquireConnection(LWaitSpan, LWaits);
+  except
+    on E: Exception do
+    begin
+      RedisFinishPoolWaitSpan(LWaitSpan, LWaits, E);
+      raise;
+    end;
+  end;
+  RedisFinishPoolWaitSpan(LWaitSpan, LWaits, nil);
+end;
+
+function TRedisPool.AcquireConnection(var AWaitSpan: IPcSpan;
+  var AWaits: Integer): TRedisConnection;
+var
   LConn: TRedisConnection;
   LIdleMs: UInt64;
   LDeadline, LNow: UInt64;
@@ -318,6 +349,9 @@ begin
               'em %d ms (falta um Release em algum finally?)',
               [FPoolParams.MaxSize, FPoolParams.AcquireTimeoutMs]);
           LWaitMs := LDeadline - LNow;
+          if AWaitSpan = nil then
+            AWaitSpan := RedisStartPoolWaitSpan(FPoolParams.MaxSize, FParams);
+          Inc(AWaits);
           FMonitor.Wait(Cardinal(LWaitMs));
           Continue;  // reavalia sob o lock: o Wait pode acordar sem motivo
         end;

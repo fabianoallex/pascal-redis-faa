@@ -556,13 +556,57 @@ contador de entregas — contador alto denuncia mensagem venenosa, que derruba t
 que a pega), e `XInfoStream`/`XInfoGroups`/`XInfoConsumers` entregam a introspecção do
 servidor como mapa achatado.
 
+### Spans (OpenTelemetry)
+
+Quando a aplicação liga o tracer da pascal-common-faa (`TPcTracing.Start`, da unit
+`PascalCommon.Tracing`, com um exportador como o OTLP da
+[pascal-api-infra-faa](https://github.com/fabianoallex/pascal-api-infra-faa)), a lib abre os
+spans sozinha. Não há nada para configurar aqui: eles entram na trace do span corrente da
+thread, que numa API é o span de servidor da requisição.
+
+```pascal
+uses PascalCommon.Tracing;
+
+TPcTracing.Start(TPcTracingOptions.FromEnvironment('pedidos', '1.0.0'), LExportador);
+...
+LCliente.Strings.SetValue('sessao:42', LToken);   // span client 'SET'
+```
+
+| Span | Kind | Quando | Atributos |
+|---|---|---|---|
+| o comando (`GET`, `XREADGROUP`; com o subcomando nos containers: `CLIENT SETNAME`, `XGROUP CREATE`) | client | todo `Execute`/`ExecuteRaw`/`ExecuteArgs`, logo, toda fachada | `db.system.name` (`redis`), `db.operation.name`, `db.query.text`, `db.namespace` (o índice do banco), `server.address`, `server.port` |
+| `PIPELINE` | client | um `ExecutePipeline` | os mesmos, sem `db.query.text`, mais `db.operation.batch.size` |
+| `MULTI` | client | uma transação (`TRedisTransaction`, que vai num pipeline só) | idem; o tamanho conta só os comandos de dentro |
+| `pool wait` | internal | um `Acquire` que precisou esperar por conexão livre, da primeira espera até conseguir ou desistir | `pascalredis.pool.wait_attempts`, `pascalredis.pool.max_size`, `db.system.name` |
+
+- **`db.query.text` leva só o comando e a primeira chave**, com o resto trocado por `?`:
+  `SET sessao:42 ?`. Valor no Redis é com frequência segredo (token, sessão, a senha de um
+  `AUTH`). Comando sem chave (`PING`, `INFO`, `AUTH`, `HELLO`, `CONFIG SET`) não mostra
+  argumento nenhum. No `EVAL`/`EVALSHA` a chave é a primeira depois do `numkeys`; no
+  `XREAD`/`XREADGROUP`, a primeira depois de `STREAMS`.
+- **Erro do servidor é status de erro**, com o código (`WRONGTYPE`, `NOSCRIPT`) em
+  `db.response.status_code` e `error.type`, inclusive no `ExecuteRaw`, que não levanta. Isso
+  vale também para os erros que a lib trata como recado: o `NOSCRIPT` que o `Scripting.Run`
+  reenvia como `EVAL` e o `BUSYGROUP` do `XGroupTryCreate` aparecem como um span com erro.
+  Queda, timeout e fluxo malformado põem a classe da exceção em `error.type`. Num lote, os
+  itens com erro (no `MULTI`, também os de dentro do array do `EXEC`) contam em
+  `pascalredis.batch.error_count`.
+- **Sem span:** o handshake (`HELLO`/`AUTH`, `CLIENT SETNAME`, `SELECT`), o `Ping` do health
+  check do pool (`Execute('PING', [])` tem span) e a conexão do assinante de pub/sub: a
+  mensagem publicada no Redis não carrega header, então não haveria contexto para
+  propagar, e cada mensagem viraria uma trace solta. O `PUBLISH` tem span como qualquer
+  comando.
+- **Desligado, não custa nada:** com `TPcTracing.Enabled` falso não se cria span, nem os
+  ids, nem o texto do comando.
+- Comando bloqueante tem span como os outros, e a duração inclui a espera do servidor.
+
 ## Build
 
 **Dependência:** a lib usa a
-[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.2.0 ou mais
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.8.0 ou mais
 nova** — a base compartilhada pelas libs `*-faa`, de onde vêm o monitor/condvar, os
-atomics portáveis, o relógio monotônico e o pool de threads (`TPcMonitor`, `PcAtomic*`,
-`PcTickMs`, `PcPool`). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
+atomics portáveis, o relógio monotônico, o pool de threads (`TPcMonitor`, `PcAtomic*`,
+`PcTickMs`, `PcPool`) e os spans (`PascalCommon.Tracing`). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
 libs `*-faa` que ela usar: no Lazarus, registre o `pascal_common_faa.lpk` (o
 `pascal_redis_faa.lpk` o exige pelo nome); no Delphi, ponha o `src` dela no search path.
 Uma cópia velha demais para o build com uma mensagem dizendo isso. O submódulo

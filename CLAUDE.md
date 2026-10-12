@@ -65,8 +65,8 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
   sempre palavra inteira (`\b`) e `perl -pi`, nunca `sed -i` (troca CRLF por LF no Git
   for Windows — gotcha 3 da pascal-common-faa).
 - **A lib nunca embute a pascal-common-faa.** O `pascal_redis_faa.lpk` exige
-  `pascal_common_faa` **só pelo nome**, com `MinVersion` 1.2: a aplicação fornece a cópia
-  única. O submódulo `external/pascal-common-faa` (tag `v1.2.0`, checkout **sem**
+  `pascal_common_faa` **só pelo nome**, com `MinVersion` 1.8: a aplicação fornece a cópia
+  única. O submódulo `external/pascal-common-faa` (tag `v1.8.0`, checkout **sem**
   `--recursive`) existe para testes, samples e scripts. Os `.lpi` deles listam
   `pascal_common_faa` **primeiro**, com `DefaultFilename` em `external/` e `Prefer="True"`
   (sem o `Prefer`, um pacote registrado no IDE ganharia); os `.dproj` têm
@@ -80,6 +80,11 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
   unit; medido no FPC, ver seção 50). Item que toca a form tem de ser esperado antes.
   O `Destroy` de um `TPcThreadPool` **executa** a fila inteira; só descarta o item
   enfileirado depois de o `Destroy` começar.
+- **Spans (0.2.0):** a `Redis.Tracing` usa o `PascalCommon.Tracing` (fase D da
+  observabilidade da pascal-api-infra-faa). Um span por comando no kernel
+  (`ExecuteRaw`/`ExecuteArgs`/`ExecutePipeline`), `pool wait` no `Acquire`; `db.query.text`
+  só com comando + primeira chave. Todo span nasce e termina na mesma chamada e na mesma
+  thread: é a regra de threads do tracer. Racional na seção 51 de `docs/DECISOES.md`.
 - **Correção na pascal-common-faa não se faz daqui.** O que precisar mudar lá vai para
   `.ci/f8-findings-for-pascal-common-faa.md` (versionado).
 
@@ -221,6 +226,7 @@ src/Redis.Commands.PubSub.pas    PUBLISH SPUBLISH PUBSUB CHANNELS/NUMSUB/NUMPAT 
 src/Redis.Transaction.pas        TRedisTransaction: MULTI/EXEC/WATCH em um pipeline só
 src/Redis.PubSub.pas             TRedisSubscriber: conexão dedicada + thread de leitura + callbacks
 src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico + CreateSubscriber
+src/Redis.Tracing.pas            spans do OpenTelemetry (PascalCommon.Tracing): nome, texto sanitizado, atributos
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao

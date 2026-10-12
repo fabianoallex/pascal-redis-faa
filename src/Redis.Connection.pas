@@ -112,6 +112,7 @@ type
     FBuffer: TBytes;
     FLength: Integer;
     FCount: Integer;
+    FFirstCommand: string;
     procedure Append(const ABytes: TBytes);
   public
     constructor Create;
@@ -130,6 +131,11 @@ type
     /// Quantos comandos estao enfileirados — e, portanto, quantas respostas o
     /// ExecutePipeline vai devolver.
     property Count: Integer read FCount;
+
+    /// Nome (em maiusculas) do primeiro comando enfileirado; '' com o lote
+    /// vazio. E' por ele que o span do lote se chama MULTI (uma transacao,
+    /// ver Redis.Transaction) em vez de PIPELINE.
+    property FirstCommand: string read FFirstCommand;
 
     /// Bytes prontos para o socket. Uso interno da conexao.
     function ToBytes: TBytes;
@@ -200,6 +206,15 @@ type
     function Perform(const ABytes: TBytes; ACount: Integer): TRedisReplyArray;
     procedure SendEncoded(const ABytes: TBytes);
     function HandshakeStep(const ABytes: TBytes): IRedisReply;
+    /// Um comando ja' codificado, sob o lock, sem span. E' o caminho do
+    /// ExecuteRaw/ExecuteArgs (que o envolvem num span) e do Ping (que nao
+    /// tem span: e' o health check do pool, e um PING por emprestimo
+    /// encheria a trace de ruido).
+    function PerformLocked(const ABytes: TBytes): IRedisReply;
+    /// PerformLocked dentro do span do comando, quando o tracer esta' ligado.
+    /// AArgs[AFirst] e' o primeiro argumento depois do nome.
+    function PerformTraced(const AName: string; const AArgs: array of TRedisArg;
+      AFirst: Integer; const ABytes: TBytes): IRedisReply;
     function GetIsUsable: Boolean;
   public
     constructor Create(const AParams: TRedisParams);
@@ -290,7 +305,8 @@ type
 
     /// PING. Devolve True se o servidor respondeu PONG. Nao levanta em erro de
     /// servidor (mas levanta se a conexao morreu) — e' o health check que o
-    /// pool do M3 chama antes de emprestar uma conexao ociosa.
+    /// pool do M3 chama antes de emprestar uma conexao ociosa. Por isso nao
+    /// abre span (Redis.Tracing); Execute('PING', []) abre.
     function Ping: Boolean;
 
     /// SELECT: troca o banco corrente e memoriza o novo valor (o pool replaya
@@ -341,6 +357,10 @@ type
   end;
 
 implementation
+
+uses
+  PascalCommon.Tracing,
+  Redis.Tracing;
 
 const
   /// Nome de usuario usado no HELLO quando o parametro Username esta' vazio
@@ -420,16 +440,20 @@ end;
 
 procedure TRedisPipeline.Queue(const AName: string; const AArgs: array of TRedisArg);
 begin
+  if FCount = 0 then
+    FFirstCommand := UpperCase(Trim(AName));
   Append(RedisEncodeCommand(AName, AArgs));
 end;
 
 procedure TRedisPipeline.Queue(const AName: string);
 begin
-  Append(RedisEncodeCommand(AName, []));
+  Queue(AName, []);
 end;
 
 procedure TRedisPipeline.QueueArgs(const AArgs: array of TRedisArg);
 begin
+  if (FCount = 0) and (Length(AArgs) > 0) then
+    FFirstCommand := UpperCase(Trim(RedisUtf8Decode(AArgs[0].Bytes)));
   Append(RedisEncodeCommand(AArgs));
 end;
 
@@ -437,6 +461,7 @@ procedure TRedisPipeline.Clear;
 begin
   FLength := 0;
   FCount := 0;
+  FFirstCommand := '';
 end;
 
 function TRedisPipeline.ToBytes: TBytes;
@@ -911,34 +936,56 @@ begin
   Result := Execute(AName, []);
 end;
 
-function TRedisConnection.ExecuteArgs(const AArgs: array of TRedisArg): IRedisReply;
+function TRedisConnection.PerformLocked(const ABytes: TBytes): IRedisReply;
 var
   LReplies: TRedisReplyArray;
 begin
   FLock.Enter;
   try
     EnsureUsable;
-    LReplies := Perform(RedisEncodeCommand(AArgs), 1);
+    LReplies := Perform(ABytes, 1);
   finally
     FLock.Leave;
   end;
   Result := LReplies[0];
+end;
+
+function TRedisConnection.PerformTraced(const AName: string;
+  const AArgs: array of TRedisArg; AFirst: Integer; const ABytes: TBytes): IRedisReply;
+var
+  LSpan: IPcSpan;
+begin
+  // Desligado, nem o texto do span e' montado.
+  if not TPcTracing.Enabled then
+    Exit(PerformLocked(ABytes));
+  LSpan := RedisStartCommandSpan(AName, AArgs, AFirst, FParams, FDatabase);
+  try
+    Result := PerformLocked(ABytes);
+  except
+    on E: Exception do
+    begin
+      RedisFinishSpan(LSpan, E);
+      raise;
+    end;
+  end;
+  RedisFinishReplySpan(LSpan, Result);
+end;
+
+function TRedisConnection.ExecuteArgs(const AArgs: array of TRedisArg): IRedisReply;
+var
+  LName: string;
+begin
+  LName := '';
+  if Length(AArgs) > 0 then
+    LName := RedisUtf8Decode(AArgs[0].Bytes);
+  Result := PerformTraced(LName, AArgs, 1, RedisEncodeCommand(AArgs));
   Result.RaiseIfError;
 end;
 
 function TRedisConnection.ExecuteRaw(const AName: string;
   const AArgs: array of TRedisArg): IRedisReply;
-var
-  LReplies: TRedisReplyArray;
 begin
-  FLock.Enter;
-  try
-    EnsureUsable;
-    LReplies := Perform(RedisEncodeCommand(AName, AArgs), 1);
-  finally
-    FLock.Leave;
-  end;
-  Result := LReplies[0];
+  Result := PerformTraced(AName, AArgs, 0, RedisEncodeCommand(AName, AArgs));
 end;
 
 function TRedisConnection.ExecuteRaw(const AName: string): IRedisReply;
@@ -947,6 +994,9 @@ begin
 end;
 
 function TRedisConnection.ExecutePipeline(APipeline: TRedisPipeline): TRedisReplyArray;
+var
+  LSpan: IPcSpan;
+  LIsMulti: Boolean;
 begin
   Result := nil;
   if APipeline = nil then
@@ -958,20 +1008,41 @@ begin
     SetLength(Result, 0);
     Exit;
   end;
-  FLock.Enter;
-  try
-    EnsureUsable;
-    Result := Perform(APipeline.ToBytes, APipeline.Count);
-  finally
-    FLock.Leave;
+  LSpan := nil;
+  LIsMulti := False;
+  if TPcTracing.Enabled then
+  begin
+    // Uma transacao (Redis.Transaction) e' um lote que abre com MULTI e fecha
+    // com EXEC; o tamanho conta so' os comandos de dentro.
+    LIsMulti := (APipeline.FirstCommand = 'MULTI') and (APipeline.Count >= 2);
+    if LIsMulti then
+      LSpan := RedisStartBatchSpan('MULTI', APipeline.Count - 2, FParams, FDatabase)
+    else
+      LSpan := RedisStartBatchSpan('PIPELINE', APipeline.Count, FParams, FDatabase);
   end;
+  try
+    FLock.Enter;
+    try
+      EnsureUsable;
+      Result := Perform(APipeline.ToBytes, APipeline.Count);
+    finally
+      FLock.Leave;
+    end;
+  except
+    on E: Exception do
+    begin
+      RedisFinishSpan(LSpan, E);
+      raise;
+    end;
+  end;
+  RedisFinishBatchSpan(LSpan, Result, LIsMulti);
 end;
 
 function TRedisConnection.Ping: Boolean;
 var
   LReply: IRedisReply;
 begin
-  LReply := ExecuteRaw('PING', []);
+  LReply := PerformLocked(RedisEncodeCommand('PING', []));
   Result := (not LReply.IsError) and (UpperCase(LReply.AsString) = 'PONG');
 end;
 

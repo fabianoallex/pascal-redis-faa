@@ -1155,6 +1155,64 @@ Com a correção, o mesmo roteiro dá o consumidor acordando às 48.695 e o `For
 48.705 — a form só sai depois dele. Os três samples abrem e fecham (com e sem conexão) com
 código 0 e 0 vazamentos de heaptrc.
 
+## 51. Spans por comando, sobre o `PascalCommon.Tracing` (2026-10-09)
+
+Fase D do design de observabilidade da pascal-api-infra-faa
+(`docs/observability-design.md` de lá): as libs irmãs abrem spans que entram na trace da API
+sem depender dela, usando os contratos que foram para a pascal-common-faa na 1.7/1.8. A
+pascal-db-faa fez a parte dela na 0.13.0 e serviu de modelo. Duas escolhas foram do usuário
+(o texto do comando e o `pool wait`); as demais, como recomendadas.
+
+1. **O span nasce no kernel, não nas famílias.** `TRedisConnection.ExecuteRaw`/`ExecuteArgs`
+   (e, por eles, `Execute`) e `ExecutePipeline` abrem os spans, então as nove famílias, o
+   `TRedisClient` e o `ExecuteBlocking` ficam cobertos sem uma linha mudada. Comando de duas
+   palavras vira um nome só nos containers conhecidos (`CLIENT SETNAME`, `XGROUP CREATE`),
+   com o subcomando filtrado para letras e no máximo 32 caracteres: o nome do span precisa
+   de cardinalidade baixa, e texto livre ali seria a chave ou um valor.
+2. **`db.query.text` = comando + primeira chave + `?` (usuário).** O OpenTelemetry sugere o
+   comando inteiro, sanitizado; no Redis o valor é com frequência o segredo (token, sessão,
+   a senha de um `AUTH` mandado pelo `Execute`), e o que se procura numa trace é a chave
+   quente. A posição da chave depende do comando: a regra geral é o primeiro argumento,
+   com três exceções tratadas por tabela — comandos sem chave (nada aparece), comandos com
+   `numkeys` antes das chaves (`EVAL*`, `FCALL*`, `*MPOP`, `ZINTER`...) e
+   `XREAD`/`XREADGROUP` (depois de `STREAMS`). Comando que a tabela não conhece cai na regra
+   geral — o pior caso é mostrar um argumento que não era chave; nunca mais de um.
+3. **Erro do servidor é status de erro, inclusive o que a lib trata como recado.** O
+   `NOSCRIPT` que o `Scripting.Run` resolve reenviando `EVAL`, e o `BUSYGROUP` do
+   `XGroupTryCreate`, aparecem como spans com erro. No nível da conexão não se sabe quem vai
+   tratar a resposta, e esconder o erro ali exigiria a família avisar o kernel — acoplamento
+   que o M4 evitou de propósito. O span conta o que o servidor respondeu. Num lote, o
+   primeiro erro dá o status e a contagem vai em `pascalredis.batch.error_count`; num
+   `MULTI`, os itens do array do `EXEC` contam também, porque é ali que vem o erro de
+   execução (não é rollback, seção 34).
+4. **Lote é um span só.** `PIPELINE` com `db.operation.batch.size`; a transação, que já é um
+   pipeline (seção 35), vira `MULTI`, com o tamanho sem o envelope. A conexão reconhece a
+   transação pelo primeiro comando enfileirado (`TRedisPipeline.FirstCommand`), em vez de a
+   `Redis.Transaction` ganhar um caminho próprio no kernel.
+5. **Fora da trace:** o handshake (é parte de abrir a conexão, e a conexão nova já aparece
+   como parte da duração do `pool wait` ou do primeiro comando), o `Ping` do health check do
+   pool (um span por empréstimo seria ruído; `Execute('PING')` continua com span) e a
+   conexão do assinante. Pub/sub não tem header no Redis, então não há `traceparent` a
+   propagar: um span por mensagem recebida seria uma trace órfã cada. Quem precisa ligar
+   produtor e consumidor usa streams e põe o `traceparent` num campo da entrada — decisão da
+   aplicação, não da lib.
+6. **`pool wait` (usuário)** só quando há espera de fato, da primeira espera até conseguir
+   a conexão ou desistir com `ERedisPoolExhausted` (`error.type`). Sem espera, nenhum span:
+   o caminho comum não paga nada.
+7. **Thread:** todo span daqui nasce e termina na mesma chamada, na thread que chamou — é a
+   regra de threads do `PascalCommon.Tracing` (span corrente só termina na thread que o
+   abriu), por isso não há span destacado. A pascal-db-faa precisou do `StartDetachedSpan`
+   para a transação que comita em outra thread; aqui a transação é um pipeline só, que
+   começa e termina no `TryCommit`.
+8. **Desligado, custo zero:** o `TPcTracing.Enabled` (sem lock) é conferido antes de montar
+   o texto do comando. A versão mínima da pascal-common-faa subiu para a 1.8 (a 1.7 já tinha
+   o que se usa aqui, mas é a 1.8 que as irmãs validam, e assim uma aplicação não fica com
+   duas exigências diferentes para o mesmo pacote).
+
+Testado em `Redis.TracingTests` (29 testes, sobre o servidor falso e o `TRedisFakePool`, com
+um exportador que só guarda os spans) e num teste de integração que passa pela fachada, o
+pool e o pool dos bloqueantes contra o servidor de verdade.
+
 ---
 
 ## Compatibilidade e nomenclatura

@@ -6,6 +6,30 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
+### Adicionado
+
+- **Spans do OpenTelemetry** pelo `PascalCommon.Tracing` da pascal-common-faa 1.8.0 (fase D
+  do design de observabilidade da pascal-api-infra-faa), criados só com `TPcTracing.Enabled`:
+  um span client por comando (`Execute`, `ExecuteRaw`, `ExecuteArgs` e, portanto, toda
+  fachada), um por pipeline (`PIPELINE`) ou transação (`MULTI`), e um `pool wait` para o
+  `Acquire` que precisou esperar. Atributos do OpenTelemetry para bancos (`db.system.name`,
+  `db.operation.name`, `db.namespace`, `server.address`...); `db.query.text` leva só o
+  comando e a primeira chave (`SET sessao:42 ?`), nunca os valores. Erro do servidor vira
+  status de erro com o código em `error.type`. Sem span: handshake, o `Ping` do health
+  check e o assinante de pub/sub. Ver "Spans (OpenTelemetry)" no README.
+- Unit `Redis.Tracing` (`RedisSpanOperation`, `RedisSpanQueryText` e os helpers que abrem e
+  fecham os spans) e `TRedisPipeline.FirstCommand`.
+
+### Alterado
+
+- A versão mínima exigida da pascal-common-faa sobe de `1.2.0` para `1.8.0` (checagem na
+  `Redis.Types` e `MinVersion` do `.lpk`), e o submódulo `external/pascal-common-faa` vai
+  para a `v1.8.0`.
+- `TRedisConnection.Ping` não passa mais pelo `ExecuteRaw` (para não abrir span); o
+  comportamento é o mesmo.
+
 ## [0.1.2] - 2026-10-05
 
 ### Alterado
@@ -85,7 +109,8 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/fabianoallex/pascal-redis-faa/releases/tag/v0.1.0

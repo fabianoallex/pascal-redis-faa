@@ -567,13 +567,57 @@ a high count betrays a poison message that kills every worker picking it up), an
 `XInfoStream`/`XInfoGroups`/`XInfoConsumers` hand over the server's introspection as a
 flattened map.
 
+### Spans (OpenTelemetry)
+
+When the application starts pascal-common-faa's tracer (`TPcTracing.Start`, in
+`PascalCommon.Tracing`, with an exporter such as
+[pascal-api-infra-faa](https://github.com/fabianoallex/pascal-api-infra-faa)'s OTLP one), the
+library opens spans on its own. Nothing to configure here: they join the trace of whatever
+span is current on the thread, which in an API is the request's server span.
+
+```pascal
+uses PascalCommon.Tracing;
+
+TPcTracing.Start(TPcTracingOptions.FromEnvironment('orders', '1.0.0'), LExporter);
+...
+LClient.Strings.SetValue('session:42', LToken);   // client span 'SET'
+```
+
+| Span | Kind | When | Attributes |
+|---|---|---|---|
+| the command (`GET`, `XREADGROUP`; with the subcommand for containers: `CLIENT SETNAME`, `XGROUP CREATE`) | client | every `Execute`/`ExecuteRaw`/`ExecuteArgs`, and so every facade | `db.system.name` (`redis`), `db.operation.name`, `db.query.text`, `db.namespace` (the database index), `server.address`, `server.port` |
+| `PIPELINE` | client | an `ExecutePipeline` | the same, without `db.query.text`, plus `db.operation.batch.size` |
+| `MULTI` | client | a transaction (`TRedisTransaction`, sent as a single pipeline) | the same; the size counts only the commands inside |
+| `pool wait` | internal | an `Acquire` that had to wait for a free connection, from the first wait until it got one or gave up | `pascalredis.pool.wait_attempts`, `pascalredis.pool.max_size`, `db.system.name` |
+
+- **`db.query.text` carries only the command and the first key**, with the rest replaced by
+  `?`: `SET session:42 ?`. Redis values are often secrets (a token, a session, the password
+  of an `AUTH`). A command without a key (`PING`, `INFO`, `AUTH`, `HELLO`, `CONFIG SET`)
+  shows no argument at all. For `EVAL`/`EVALSHA` the key is the first one after `numkeys`;
+  for `XREAD`/`XREADGROUP`, the first one after `STREAMS`.
+- **A server error is an error status**, with the code (`WRONGTYPE`, `NOSCRIPT`) in
+  `db.response.status_code` and `error.type`, also on `ExecuteRaw`, which doesn't raise.
+  That includes the errors the library treats as a signal: the `NOSCRIPT` that
+  `Scripting.Run` answers by resending an `EVAL`, and `XGroupTryCreate`'s `BUSYGROUP`, show
+  up as a span with an error. A dropped connection, a timeout or a malformed stream put the
+  exception class in `error.type`. In a batch, the items with an error (in a `MULTI`, also
+  those inside the `EXEC` array) are counted in `pascalredis.batch.error_count`.
+- **No span:** the handshake (`HELLO`/`AUTH`, `CLIENT SETNAME`, `SELECT`), the pool's health
+  check `Ping` (`Execute('PING', [])` has one) and the pub/sub subscriber's connection: a
+  message published on Redis carries no header, so there is no context to propagate, and
+  every message would become a trace of its own. `PUBLISH` has a span like any command.
+- **Off, it costs nothing:** while `TPcTracing.Enabled` is false no span is created, not even
+  the ids or the command text.
+- A blocking command has a span like the others, and its duration includes the server's
+  wait.
+
 ## Build
 
 **Dependency:** the library uses
-[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.2.0 or later**
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.8.0 or later**
 — the base shared by the `*-faa` libraries, which provides the monitor/condvar, the
-portable atomics, the monotonic clock and the thread pool (`TPcMonitor`, `PcAtomic*`,
-`PcTickMs`, `PcPool`). **Your application** provides the copy, a single one for every
+portable atomics, the monotonic clock, the thread pool (`TPcMonitor`, `PcAtomic*`,
+`PcTickMs`, `PcPool`) and the spans (`PascalCommon.Tracing`). **Your application** provides the copy, a single one for every
 `*-faa` library it uses: on Lazarus, register `pascal_common_faa.lpk` (`pascal_redis_faa.lpk`
 requires it by name); on Delphi, put its `src` on the search path. A copy that is too old
 stops the build with a message saying so. This repository's

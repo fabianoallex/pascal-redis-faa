@@ -15,7 +15,7 @@
     </CompilerOptions>
     <Description Value="Cliente Redis (RESP2/RESP3) para FPC/Lazarus e Delphi, escrito do zero. Pool de conexoes, pipelining, transacoes, scripting, pub/sub, streams e TLS (SChannel no Windows; OpenSSL opt-in via -dREDIS_OPENSSL em qualquer plataforma)."/>
     <License Value="MIT"/>
-    <Version Minor="1" Release="2"/>
+    <Version Minor="2"/>
     <Files>
       <Item>
         <Filename Value="..\src\redis.inc"/>
@@ -90,6 +90,10 @@
         <UnitName Value="Redis.Client"/>
       </Item>
       <Item>
+        <Filename Value="..\src\Redis.Tracing.pas"/>
+        <UnitName Value="Redis.Tracing"/>
+      </Item>
+      <Item>
         <Filename Value="..\src\Redis.Transport.pas"/>
         <UnitName Value="Redis.Transport"/>
       </Item>
@@ -110,7 +114,7 @@
            .lpi de testes/samples apontam para external/ com Prefer="True". -->
       <Item>
         <PackageName Value="pascal_common_faa"/>
-        <MinVersion Major="1" Minor="2" Valid="True"/>
+        <MinVersion Major="1" Minor="8" Valid="True"/>
       </Item>
       <Item>
         <PackageName Value="FCL"/>
