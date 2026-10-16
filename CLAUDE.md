@@ -6,6 +6,14 @@ AMQP 0-9-1) e da `../pascal-pipes-faa` (IPC), e segue as mesmas regras. Quando a
 estiver omisso, o `CLAUDE.md` da `pascal-amqp-faa` é a referência — em especial a lista
 completa de gotchas de FPC descobertos no porte.
 
+**A skill `dual-compiler-delphi-lazarus` não está neste repositório.** Fica no
+[pascal-skills-faa](https://github.com/fabianoallex/pascal-skills-faa), que é plugin e marketplace do Claude Code. Se ela
+não estiver carregada nesta sessão, peça ao usuário para instalá-la (escopo de usuário, para valer
+também numa aplicação que usa esta lib como submódulo):
+`/plugin marketplace add fabianoallex/pascal-skills-faa` e depois
+`/plugin install pascal-skills-faa@pascal-skills-faa`. O índice de todas as libs `*-faa` está em
+`dual-compiler-delphi-lazarus/references/faa-libraries.md` desse repositório.
+
 ## Regra inegociável: proveniência do código
 
 **Nunca copiar, adaptar ou se basear em código-fonte de bibliotecas Pascal/Delphi de Redis
