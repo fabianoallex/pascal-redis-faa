@@ -1,9 +1,9 @@
 ﻿unit Redis.TracingTests;
 
 { Testes de Redis.Tracing e dos spans que a conexao e o pool abrem (DUnitX).
-  Mesma cobertura do tests\Unit\fpc\Redis.TracingTests.pas (FPCUnit) — as duas
-  suites sao mantidas linha a linha equivalentes, entao toda mudanca aqui vai
-  para la' na mesma sessao.
+  E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.TracingTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Sem servidor e sem coletor: o tracer da pascal-common-faa e' ligado com um
   exportador que so' guarda os spans (TRedisSpanCollector) e sem thread de
@@ -18,16 +18,16 @@ interface
 
 uses
   DUnitX.TestFramework,
-  System.SysUtils,
-  System.Classes,
+  Redis.DUnitXCompat,
+  SysUtils,
+  Classes,
   PascalCommon.Tracing,
   Redis.Types,
   Redis.Connection,
   Redis.Pool,
   Redis.Tracing,
   Redis.ConnectionTests,
-  Redis.PoolTests,
-  Redis.DUnitXCompat;
+  Redis.PoolTests;
 
 type
   { Exportador que guarda os spans recebidos. }

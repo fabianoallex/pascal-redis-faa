@@ -1,8 +1,14 @@
 ﻿unit Redis.IntegrationTests;
 
-{ Testes de integracao (FPCUnit). Mesma cobertura do tests\Integration\Redis.IntegrationTests.pas
-  (DUnitX/Delphi) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao.
+{$mode delphi}{$H+}
+
+{ GENERATED FILE — produced by tools/gen_fpc_mirror.py from
+  tests/Integration/Redis.IntegrationTests.pas (DUnitX). Do not edit by hand: edit the DUnitX
+  master and run the script again. }
+
+{ Testes de integracao (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Integration\fpc\Redis.IntegrationTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   PRECISAM DE UM REDIS DE VERDADE em localhost:6379 (docker/docker-compose.yml).
   Sem ele, tudo aqui falha por ERedisConnectionLost — e' o esperado, nao ha'
@@ -25,18 +31,31 @@
   fim de cada teste — nada de FLUSHDB, que apagaria dados de quem estiver
   usando o mesmo servidor. }
 
-{$mode delphi}{$H+}
-
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Classes, SyncObjs,
-  Redis.Types, PascalCommon.Threading, PascalCommon.Tracing, Redis.Connection, Redis.Pool, Redis.Client,
-  Redis.Commands, Redis.Commands.Keys, Redis.Commands.Strings,
-  Redis.Commands.Hashes, Redis.Commands.Lists, Redis.Commands.Sets,
-  Redis.Commands.ZSets, Redis.Commands.Streams, Redis.Commands.Scripting,
+  fpcunit, testregistry,
+  SysUtils,
+  Classes,
+  SyncObjs,
+  Redis.Types,
+  PascalCommon.Threading,
+  PascalCommon.Tracing,
+  Redis.Connection,
+  Redis.Pool,
+  Redis.Client,
+  Redis.Commands,
+  Redis.Commands.Keys,
+  Redis.Commands.Strings,
+  Redis.Commands.Hashes,
+  Redis.Commands.Lists,
+  Redis.Commands.Sets,
+  Redis.Commands.ZSets,
+  Redis.Commands.Streams,
+  Redis.Commands.Scripting,
   Redis.Commands.PubSub,
-  Redis.Transaction, Redis.PubSub;
+  Redis.Transaction,
+  Redis.PubSub;
 
 type
   { Exportador que guarda os spans recebidos (fixture de tracing). }

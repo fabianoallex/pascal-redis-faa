@@ -1,9 +1,8 @@
 ﻿unit Redis.CommandsTests;
 
-{ Testes das fachadas por familia e do TRedisClient (DUnitX). Mesma cobertura
-  do tests\Unit\fpc\Redis.CommandsTests.pas (FPCUnit) — as duas suites sao
-  mantidas linha a linha equivalentes, entao toda mudanca aqui vai para la' na
-  mesma sessao.
+{ Testes das fachadas por familia e do TRedisClient (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.CommandsTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Sem servidor: o cliente e' amarrado a uma conexao sobre o
   TRedisFakeServerStream da Redis.ConnectionTests. Isso permite verificar as
@@ -25,8 +24,9 @@ interface
 
 uses
   DUnitX.TestFramework,
-  System.SysUtils,
-  System.Classes,
+  Redis.DUnitXCompat,
+  SysUtils,
+  Classes,
   Redis.Types,
   Redis.Resp,
   Redis.Connection,
@@ -39,8 +39,7 @@ uses
   Redis.Commands.Sets,
   Redis.Commands.ZSets,
   Redis.Commands.Streams,
-  Redis.ConnectionTests,
-  Redis.DUnitXCompat;
+  Redis.ConnectionTests;
 
 type
   [TestFixture]

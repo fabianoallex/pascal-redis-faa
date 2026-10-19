@@ -1,8 +1,14 @@
 ﻿unit Redis.ConnectionTests;
 
-{ Testes de Redis.Connection (FPCUnit). Mesma cobertura do tests\Unit\Redis.ConnectionTests.pas
-  (DUnitX/Delphi) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao.
+{$mode delphi}{$H+}
+
+{ GENERATED FILE — produced by tools/gen_fpc_mirror.py from
+  tests/Unit/Redis.ConnectionTests.pas (DUnitX). Do not edit by hand: edit the DUnitX
+  master and run the script again. }
+
+{ Testes de Redis.Connection (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.ConnectionTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Nao ha' servidor Redis aqui. A conexao e' criada com CreateOnStream sobre um
   TRedisFakeServerStream, que devolve respostas roteirizadas e guarda o que o
@@ -13,13 +19,16 @@
   resposta orfa sobrando no buffer — o bug classico de cliente Redis, que o
   pool do M3 vai usar para decidir destruir a conexao em vez de devolve-la. }
 
-{$mode delphi}{$H+}
-
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Classes,
-  Redis.Types, Redis.Resp, Redis.Connection, Redis.Transport;
+  fpcunit, testregistry,
+  SysUtils,
+  Classes,
+  Redis.Types,
+  Redis.Resp,
+  Redis.Connection,
+  Redis.Transport;
 
 type
   { Servidor Redis de mentira: entrega respostas roteirizadas e grava o que o

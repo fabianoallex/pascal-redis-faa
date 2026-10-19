@@ -1,7 +1,14 @@
 ﻿unit Redis.RespTests;
 
-{ Testes do codec RESP (FPCUnit). Mesma cobertura do tests\Unit\Redis.RespTests.pas
-  (DUnitX/Delphi) — as duas suites sao mantidas linha a linha equivalentes.
+{$mode delphi}{$H+}
+
+{ GENERATED FILE — produced by tools/gen_fpc_mirror.py from
+  tests/Unit/Redis.RespTests.pas (DUnitX). Do not edit by hand: edit the DUnitX
+  master and run the script again. }
+
+{ Testes do codec RESP (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.RespTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   O que estes testes perseguem, em ordem de quanto doem em producao:
 
@@ -14,12 +21,14 @@
     3. Nulo diferente de vazio. '$-1' e '$0' sao coisas distintas.
     4. Fluxo malformado vira excecao, nao leitura torta. }
 
-{$mode delphi}{$H+}
-
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Math, Redis.Types, Redis.Resp;
+  fpcunit, testregistry,
+  SysUtils,
+  Math,
+  Redis.Types,
+  Redis.Resp;
 
 type
   TRedisCommandEncodeTests = class(TTestCase)

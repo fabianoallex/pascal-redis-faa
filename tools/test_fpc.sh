@@ -14,6 +14,9 @@
 # Edition nao compila fora do IDE): rode tests\Unit\Redis.UnitTests.dproj e
 # tests\Integration\Redis.IntegrationSuite.dproj pelo IDE.
 #
+# Antes de compilar, regenera os espelhos FPCUnit a partir dos mestres DUnitX
+# (tools/gen_fpc_mirror.py). O test_fpc_docker.sh so' confere (--check).
+#
 # Variaveis:
 #   SUITES     "unit", "integration" ou as duas (padrao).
 #   BUILDMODE  build mode do lazbuild, ex.: openssl (padrao: o Default).
@@ -27,6 +30,9 @@ MODE=""
 
 [ -f "$ROOT/external/pascal-common-faa/src/PascalCommon.ThreadPool.pas" ] \
   || { echo "external/pascal-common-faa vazio: git submodule update --init external/pascal-common-faa"; exit 1; }
+
+# Os espelhos FPCUnit (tests/*/fpc/*Tests.pas) sao gerados dos mestres DUnitX.
+( cd "$ROOT" && python tools/gen_fpc_mirror.py )
 
 FAIL=0
 for S in $SUITES; do

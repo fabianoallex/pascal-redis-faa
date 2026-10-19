@@ -5,7 +5,8 @@
 
   A suite irma em FPCUnit fica em tests\Unit\fpc — as duas tem a MESMA cobertura
   e o corpo dos testes e' identico (o Redis.DUnitXCompat existe justamente para
-  isso). Toda mudanca de um lado vai para o outro na mesma sessao. }
+  isso). Os espelhos FPCUnit sao GERADOS daqui por tools/gen_fpc_mirror.py:
+  mude os .pas DUnitX, nunca os de fpc. }
 
 {$APPTYPE CONSOLE}
 {$STRONGLINKTYPES ON}

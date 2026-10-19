@@ -19,38 +19,45 @@
 interface
 
 uses
+  SysUtils, // ExceptClass
   DUnitX.TestFramework;
 
 type
+  /// Same name and signature as FPCUnit's TRunMethod.
+  TRunMethod = procedure of object;
+
   TAssert = class
   public
     class procedure AssertEquals(const AExpected, AActual: string); overload;
     class procedure AssertEquals(const AMessage, AExpected, AActual: string); overload;
     class procedure AssertEquals(AExpected, AActual: Integer); overload;
-    class procedure AssertEquals(const AMessage: string;
-      AExpected, AActual: Integer); overload;
+    class procedure AssertEquals(const AMessage: string; AExpected, AActual: Integer); overload;
     class procedure AssertEquals(AExpected, AActual: Int64); overload;
-    class procedure AssertEquals(const AMessage: string;
-      AExpected, AActual: Int64); overload;
+    class procedure AssertEquals(const AMessage: string; AExpected, AActual: Int64); overload;
+    class procedure AssertEquals(AExpected, AActual: Currency); overload;
+    class procedure AssertEquals(const AMessage: string; AExpected, AActual: Currency); overload;
     class procedure AssertEquals(AExpected, AActual, ADelta: Double); overload;
-    class procedure AssertEquals(const AMessage: string;
-      AExpected, AActual, ADelta: Double); overload;
+    class procedure AssertEquals(const AMessage: string; AExpected, AActual, ADelta: Double); overload;
+    class procedure AssertEquals(AExpected, AActual: Boolean); overload;
+    class procedure AssertEquals(const AMessage: string; AExpected, AActual: Boolean); overload;
 
     class procedure AssertTrue(ACondition: Boolean); overload;
-    class procedure AssertTrue(const AMessage: string;
-      ACondition: Boolean); overload;
+    class procedure AssertTrue(const AMessage: string; ACondition: Boolean); overload;
     class procedure AssertFalse(ACondition: Boolean); overload;
-    class procedure AssertFalse(const AMessage: string;
-      ACondition: Boolean); overload;
+    class procedure AssertFalse(const AMessage: string; ACondition: Boolean); overload;
 
     class procedure Fail(const AMessage: string);
+
+    class procedure AssertException(AExceptionClass: ExceptClass; AMethod: TRunMethod); overload;
+    class procedure AssertException(const AMessage: string; AExceptionClass: ExceptClass;
+      AMethod: TRunMethod); overload;
   end;
 
 implementation
 
 class procedure TAssert.AssertEquals(const AExpected, AActual: string);
 begin
-  // False = sensivel a maiusculas. O padrao do DUnitX seria True.
+  // False = case-sensitive. DUnitX's default would be True.
   Assert.AreEqual(AExpected, AActual, False);
 end;
 
@@ -64,8 +71,7 @@ begin
   Assert.AreEqual(AExpected, AActual);
 end;
 
-class procedure TAssert.AssertEquals(const AMessage: string;
-  AExpected, AActual: Integer);
+class procedure TAssert.AssertEquals(const AMessage: string; AExpected, AActual: Integer);
 begin
   Assert.AreEqual(AExpected, AActual, AMessage);
 end;
@@ -75,8 +81,17 @@ begin
   Assert.AreEqual(AExpected, AActual);
 end;
 
-class procedure TAssert.AssertEquals(const AMessage: string;
-  AExpected, AActual: Int64);
+class procedure TAssert.AssertEquals(const AMessage: string; AExpected, AActual: Int64);
+begin
+  Assert.AreEqual(AExpected, AActual, AMessage);
+end;
+
+class procedure TAssert.AssertEquals(AExpected, AActual: Currency);
+begin
+  Assert.AreEqual(AExpected, AActual);
+end;
+
+class procedure TAssert.AssertEquals(const AMessage: string; AExpected, AActual: Currency);
 begin
   Assert.AreEqual(AExpected, AActual, AMessage);
 end;
@@ -86,10 +101,19 @@ begin
   Assert.AreEqual(AExpected, AActual, ADelta);
 end;
 
-class procedure TAssert.AssertEquals(const AMessage: string;
-  AExpected, AActual, ADelta: Double);
+class procedure TAssert.AssertEquals(const AMessage: string; AExpected, AActual, ADelta: Double);
 begin
   Assert.AreEqual(AExpected, AActual, ADelta, AMessage);
+end;
+
+class procedure TAssert.AssertEquals(AExpected, AActual: Boolean);
+begin
+  Assert.AreEqual(AExpected, AActual);
+end;
+
+class procedure TAssert.AssertEquals(const AMessage: string; AExpected, AActual: Boolean);
+begin
+  Assert.AreEqual(AExpected, AActual, AMessage);
 end;
 
 class procedure TAssert.AssertTrue(ACondition: Boolean);
@@ -97,8 +121,7 @@ begin
   Assert.IsTrue(ACondition);
 end;
 
-class procedure TAssert.AssertTrue(const AMessage: string;
-  ACondition: Boolean);
+class procedure TAssert.AssertTrue(const AMessage: string; ACondition: Boolean);
 begin
   Assert.IsTrue(ACondition, AMessage);
 end;
@@ -108,8 +131,7 @@ begin
   Assert.IsFalse(ACondition);
 end;
 
-class procedure TAssert.AssertFalse(const AMessage: string;
-  ACondition: Boolean);
+class procedure TAssert.AssertFalse(const AMessage: string; ACondition: Boolean);
 begin
   Assert.IsFalse(ACondition, AMessage);
 end;
@@ -117,6 +139,17 @@ end;
 class procedure TAssert.Fail(const AMessage: string);
 begin
   Assert.Fail(AMessage);
+end;
+
+class procedure TAssert.AssertException(AExceptionClass: ExceptClass; AMethod: TRunMethod);
+begin
+  Assert.WillRaise(AMethod, AExceptionClass);
+end;
+
+class procedure TAssert.AssertException(const AMessage: string; AExceptionClass: ExceptClass;
+  AMethod: TRunMethod);
+begin
+  Assert.WillRaise(AMethod, AExceptionClass, AMessage);
 end;
 
 end.

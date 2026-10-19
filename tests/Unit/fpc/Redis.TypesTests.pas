@@ -1,15 +1,22 @@
 ﻿unit Redis.TypesTests;
 
-{ Testes de Redis.Types (FPCUnit). Mesma cobertura do tests\Unit\Redis.TypesTests.pas
-  (DUnitX/Delphi) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao. }
-
 {$mode delphi}{$H+}
+
+{ GENERATED FILE — produced by tools/gen_fpc_mirror.py from
+  tests/Unit/Redis.TypesTests.pas (DUnitX). Do not edit by hand: edit the DUnitX
+  master and run the script again. }
+
+{ Testes de Redis.Types (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.TypesTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho. }
 
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Math, Redis.Types;
+  fpcunit, testregistry,
+  SysUtils,
+  Math,
+  Redis.Types;
 
 type
   TRedisUtf8Tests = class(TTestCase)

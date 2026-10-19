@@ -7,8 +7,8 @@
 
   A suite irma em FPCUnit fica em tests\Integration\fpc — as duas tem a MESMA
   cobertura e o corpo dos testes e' identico (e' para isso que existe o
-  Redis.DUnitXCompat). Toda mudanca de um lado vai para o outro na mesma
-  sessao.
+  Redis.DUnitXCompat). O espelho FPCUnit e' GERADO daqui por
+  tools/gen_fpc_mirror.py: mude o .pas DUnitX, nunca o de fpc.
 
   O nome do programa nao e' Redis.IntegrationTests porque ja' existe a UNIT com
   esse nome, e Delphi nao aceita projeto e unit homonimos no mesmo escopo. }

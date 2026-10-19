@@ -1,9 +1,14 @@
 ﻿unit Redis.TransactionTests;
 
-{ Testes de Redis.Transaction e Redis.Commands.Scripting (FPCUnit). Mesma
-  cobertura do tests\Unit\Redis.TransactionTests.pas (DUnitX/Delphi) — as duas
-  suites sao mantidas linha a linha equivalentes, entao toda mudanca aqui vai
-  para la' na mesma sessao.
+{$mode delphi}{$H+}
+
+{ GENERATED FILE — produced by tools/gen_fpc_mirror.py from
+  tests/Unit/Redis.TransactionTests.pas (DUnitX). Do not edit by hand: edit the DUnitX
+  master and run the script again. }
+
+{ Testes de Redis.Transaction e Redis.Commands.Scripting (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.TransactionTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Sem servidor: tudo roda sobre o TRedisFakeServerStream da
   Redis.ConnectionTests. E' o que permite verificar duas coisas que um teste de
@@ -21,14 +26,19 @@
   esta lib: um teste que confere o SHA contra o proprio codigo que o produz nao
   testa nada. }
 
-{$mode delphi}{$H+}
-
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Classes,
-  Redis.Types, Redis.Resp, Redis.Connection, Redis.Commands,
-  Redis.Commands.Scripting, Redis.Transaction, Redis.Client,
+  fpcunit, testregistry,
+  SysUtils,
+  Classes,
+  Redis.Types,
+  Redis.Resp,
+  Redis.Connection,
+  Redis.Commands,
+  Redis.Commands.Scripting,
+  Redis.Transaction,
+  Redis.Client,
   Redis.ConnectionTests;
 
 type

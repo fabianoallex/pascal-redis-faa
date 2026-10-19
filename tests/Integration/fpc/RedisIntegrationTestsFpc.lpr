@@ -1,7 +1,7 @@
 ﻿program RedisIntegrationTestsFpc;
 
 { Runner FPCUnit dos testes de INTEGRACAO (mesma cobertura do
-  tests\Integration\*.pas DUnitX/Delphi, portada para FPCUnit).
+  tests\Integration\*.pas DUnitX/Delphi, gerada por tools/gen_fpc_mirror.py).
 
   PRECISA de um Redis em localhost:6379 — suba com docker/docker-compose.yml
   antes de rodar. Sem servidor, todos os testes falham por conexao recusada.

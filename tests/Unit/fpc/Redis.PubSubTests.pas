@@ -1,8 +1,14 @@
 ﻿unit Redis.PubSubTests;
 
-{ Testes de Redis.PubSub (FPCUnit). Mesma cobertura do tests\Unit\Redis.PubSubTests.pas
-  (DUnitX/Delphi) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao.
+{$mode delphi}{$H+}
+
+{ GENERATED FILE — produced by tools/gen_fpc_mirror.py from
+  tests/Unit/Redis.PubSubTests.pas (DUnitX). Do not edit by hand: edit the DUnitX
+  master and run the script again. }
+
+{ Testes de Redis.PubSub (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.PubSubTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Duas metades bem diferentes:
 
@@ -23,13 +29,18 @@
   suite inteira, ja' que a thread de leitura fica parada esperando o servidor
   falar. }
 
-{$mode delphi}{$H+}
-
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Classes, SyncObjs,
-  Redis.Types, Redis.Resp, PascalCommon.Threading, Redis.Connection, Redis.Commands,
+  fpcunit, testregistry,
+  SysUtils,
+  Classes,
+  SyncObjs,
+  Redis.Types,
+  Redis.Resp,
+  PascalCommon.Threading,
+  Redis.Connection,
+  Redis.Commands,
   Redis.PubSub;
 
 type

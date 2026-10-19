@@ -1,17 +1,17 @@
 ﻿unit Redis.TypesTests;
 
-{ Testes de Redis.Types (DUnitX). Mesma cobertura do tests\Unit\fpc\Redis.TypesTests.pas
-  (FPCUnit) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao. }
+{ Testes de Redis.Types (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.TypesTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho. }
 
 interface
 
 uses
   DUnitX.TestFramework,
-  System.SysUtils,
-  System.Math,
-  Redis.Types,
-  Redis.DUnitXCompat;
+  Redis.DUnitXCompat,
+  SysUtils,
+  Math,
+  Redis.Types;
 
 type
   [TestFixture]

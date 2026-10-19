@@ -1,8 +1,8 @@
 ﻿unit Redis.ConnectionTests;
 
-{ Testes de Redis.Connection (DUnitX). Mesma cobertura do tests\Unit\fpc\Redis.ConnectionTests.pas
-  (FPCUnit) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao.
+{ Testes de Redis.Connection (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.ConnectionTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Nao ha' servidor Redis aqui. A conexao e' criada com CreateOnStream sobre um
   TRedisFakeServerStream, que devolve respostas roteirizadas e guarda o que o
@@ -17,13 +17,13 @@ interface
 
 uses
   DUnitX.TestFramework,
-  System.SysUtils,
-  System.Classes,
+  Redis.DUnitXCompat,
+  SysUtils,
+  Classes,
   Redis.Types,
   Redis.Resp,
   Redis.Connection,
-  Redis.Transport,
-  Redis.DUnitXCompat;
+  Redis.Transport;
 
 type
   { Servidor Redis de mentira: entrega respostas roteirizadas e grava o que o

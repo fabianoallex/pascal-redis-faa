@@ -330,17 +330,26 @@ nunca bloqueia o usuário da lib.
   `tests/Unit/Redis.DUnitXCompat.pas`, que expõe a API de asserts do FPCUnit por cima do
   `Assert` do DUnitX (e de quebra torna a comparação de strings sensível a maiúsculas — o
   `Assert.AreEqual(string, string)` do DUnitX ignora caixa por padrão, o que enfraqueceria
-  os testes em silêncio e só do lado Delphi). Ao mexer numa suíte, portar para a outra na
-  mesma sessão; conferir com um `diff` das seções de implementation.
-  **A tradução é mecânica, então faça por script em vez de à mão** (foi assim que a
-  `Redis.PubSubTests` nasceu nos dois lados, no M7): escreva o arquivo DUnitX e derive o
-  gêmeo FPCUnit trocando (a) o cabeçalho, que cita o caminho da suíte irmã, (b) o `uses`
-  — `fpcunit, testregistry, SysUtils, Classes, ...` no lugar de
-  `DUnitX.TestFramework, System.*, ..., Redis.DUnitXCompat` —, (c) `[TestFixture] X = class`
-  + `public` por `X = class(TTestCase)` + `published`, removendo os prefixos `[Test] `, e
-  (d) `TDUnitX.RegisterTestFixture(X)` por `RegisterTest(X)`. Acrescente `{$mode delphi}{$H+}`
-  antes do `interface`. Depois um `diff` dos dois arquivos tem de mostrar **só** essas
-  quatro coisas — é a prova barata de que a cobertura não divergiu.
+  os testes em silêncio e só do lado Delphi).
+  **O mestre é sempre o arquivo DUnitX; o espelho FPCUnit é GERADO** (desde 2026-10-19).
+  `python tools/gen_fpc_mirror.py` escreve `tests/*/fpc/*Tests.pas` a partir de
+  `tests/*/*Tests.pas` — troca só a declaração das fixtures, o `uses` e o registro, e
+  carimba o cabeçalho "GENERATED FILE". **Nunca edite `tests/*/fpc/*Tests.pas` à mão.**
+  O `tools/test_fpc.sh` regenera antes de compilar; o `tools/test_fpc_docker.sh` só confere
+  (`--check`, falha se algum espelho estiver desatualizado). Regras para o mestre, que o
+  gerador exige: `uses` começando por `DUnitX.TestFramework, Redis.DUnitXCompat,` e units
+  da RTL pelo nome curto (`SysUtils`, não `System.SysUtils` — o FPC 3.2.2 não tem o nome
+  com namespace, e o Delphi resolve pelo `DCC_Namespace` dos `.dproj`); só o dialeto
+  `TAssert.*` nos corpos; e comparação de `Double` **sempre com delta**
+  (`AssertEquals(E, A, 0)` para exato) — o FPCUnit 3.2.2 não tem a sobrecarga sem delta e
+  cai em silêncio na de `Currency`.
+  **O kit de testes vem da skill `dual-compiler-delphi-lazarus` e não se edita aqui:**
+  `tools/gen_fpc_mirror.py` é cópia byte a byte do `scripts/gen_fpc_mirror.py` dela, e o
+  `tests/Unit/Redis.DUnitXCompat.pas` é o `assets/DUnitXCompat.pas.template` (só o
+  comentário do topo é nosso). Conferir com
+  `python <skill>/scripts/check_test_kit.py .` (tem de dizer "same as the skill's");
+  melhoria no gerador ou no adaptador vai para o repositório pascal-skills-faa e volta por
+  `check_test_kit.py . --install Redis`.
 - **Suíte de integração (M3–M8, pronta):** `tests/Integration` (DUnitX/Delphi, projeto
   `Redis.IntegrationSuite.dproj`) + `tests/Integration/fpc` (FPCUnit). **Precisa do
   container de pé.** O M4 acrescentou uma fixture por família, mais a do

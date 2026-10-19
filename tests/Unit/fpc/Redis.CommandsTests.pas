@@ -1,9 +1,14 @@
 ﻿unit Redis.CommandsTests;
 
-{ Testes das fachadas por familia e do TRedisClient (FPCUnit). Mesma cobertura
-  do tests\Unit\Redis.CommandsTests.pas (DUnitX/Delphi) — as duas suites sao
-  mantidas linha a linha equivalentes, entao toda mudanca aqui vai para la' na
-  mesma sessao.
+{$mode delphi}{$H+}
+
+{ GENERATED FILE — produced by tools/gen_fpc_mirror.py from
+  tests/Unit/Redis.CommandsTests.pas (DUnitX). Do not edit by hand: edit the DUnitX
+  master and run the script again. }
+
+{ Testes das fachadas por familia e do TRedisClient (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.CommandsTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Sem servidor: o cliente e' amarrado a uma conexao sobre o
   TRedisFakeServerStream da Redis.ConnectionTests. Isso permite verificar as
@@ -21,15 +26,23 @@
   Length, que conta bytes no FPC e caracteres no Delphi. Binario e acentuacao
   sao cobertos pelos testes de integracao, contra o servidor de verdade. }
 
-{$mode delphi}{$H+}
-
 interface
 
 uses
-  fpcunit, testregistry, SysUtils, Classes,
-  Redis.Types, Redis.Resp, Redis.Connection, Redis.Client, Redis.Commands,
-  Redis.Commands.Keys, Redis.Commands.Strings, Redis.Commands.Hashes,
-  Redis.Commands.Lists, Redis.Commands.Sets, Redis.Commands.ZSets,
+  fpcunit, testregistry,
+  SysUtils,
+  Classes,
+  Redis.Types,
+  Redis.Resp,
+  Redis.Connection,
+  Redis.Client,
+  Redis.Commands,
+  Redis.Commands.Keys,
+  Redis.Commands.Strings,
+  Redis.Commands.Hashes,
+  Redis.Commands.Lists,
+  Redis.Commands.Sets,
+  Redis.Commands.ZSets,
   Redis.Commands.Streams,
   Redis.ConnectionTests;
 

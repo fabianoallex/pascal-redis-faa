@@ -1,7 +1,8 @@
 ﻿unit Redis.RespTests;
 
-{ Testes do codec RESP (DUnitX). Mesma cobertura do tests\Unit\fpc\Redis.RespTests.pas
-  (FPCUnit) — as duas suites sao mantidas linha a linha equivalentes.
+{ Testes do codec RESP (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.RespTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   O que estes testes perseguem, em ordem de quanto doem em producao:
 
@@ -18,11 +19,11 @@ interface
 
 uses
   DUnitX.TestFramework,
-  System.SysUtils,
-  System.Math,
+  Redis.DUnitXCompat,
+  SysUtils,
+  Math,
   Redis.Types,
-  Redis.Resp,
-  Redis.DUnitXCompat;
+  Redis.Resp;
 
 type
   [TestFixture]

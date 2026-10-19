@@ -1,8 +1,8 @@
 ﻿unit Redis.PubSubTests;
 
-{ Testes de Redis.PubSub (DUnitX). Mesma cobertura do tests\Unit\fpc\Redis.PubSubTests.pas
-  (FPCUnit) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao.
+{ Testes de Redis.PubSub (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.PubSubTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Duas metades bem diferentes:
 
@@ -27,16 +27,16 @@ interface
 
 uses
   DUnitX.TestFramework,
-  System.SysUtils,
-  System.Classes,
-  System.SyncObjs,
+  Redis.DUnitXCompat,
+  SysUtils,
+  Classes,
+  SyncObjs,
   Redis.Types,
   Redis.Resp,
   PascalCommon.Threading,
   Redis.Connection,
   Redis.Commands,
-  Redis.PubSub,
-  Redis.DUnitXCompat;
+  Redis.PubSub;
 
 type
   { Servidor de mentira que fala pub/sub.

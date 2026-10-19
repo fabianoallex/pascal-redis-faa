@@ -1,8 +1,8 @@
 ﻿unit Redis.PoolTests;
 
-{ Testes de Redis.Pool (DUnitX). Mesma cobertura do tests\Unit\fpc\Redis.PoolTests.pas
-  (FPCUnit) — as duas suites sao mantidas linha a linha equivalentes, entao
-  toda mudanca aqui vai para la' na mesma sessao.
+{ Testes de Redis.Pool (DUnitX). E' o mestre do espelho FPCUnit
+  tests\Unit\fpc\Redis.PoolTests.pas, gerado daqui por
+  tools/gen_fpc_mirror.py: mude este arquivo, nunca o espelho.
 
   Tambem sem servidor: o TRedisFakePool sobrescreve o CreateConnection do pool
   para devolver conexoes sobre o TRedisFakeServerStream (o mesmo servidor falso
@@ -15,13 +15,13 @@ interface
 
 uses
   DUnitX.TestFramework,
-  System.SysUtils,
-  System.Classes,
+  Redis.DUnitXCompat,
+  SysUtils,
+  Classes,
   Redis.Types,
   Redis.Connection,
   Redis.Pool,
-  Redis.ConnectionTests,
-  Redis.DUnitXCompat;
+  Redis.ConnectionTests;
 
 type
   { Pool que abre conexoes sobre um servidor falso em vez de socket.

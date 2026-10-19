@@ -1,7 +1,7 @@
 ﻿program RedisUnitTestsFpc;
 
 { Runner FPCUnit dos testes unitarios (mesma cobertura do tests\Unit\*.pas
-  DUnitX/Delphi, portada para FPCUnit). Nao precisa de servidor Redis: o codec
+  DUnitX/Delphi, gerada por tools/gen_fpc_mirror.py). Nao precisa de servidor Redis: o codec
   e' testado sobre TRedisBytesSource, em memoria.
 
   Console (saida de texto), quando chamado com qualquer parametro:

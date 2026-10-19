@@ -41,6 +41,11 @@ CPUFLAG=""
 [ -f "$ROOT/external/pascal-common-faa/src/PascalCommon.ThreadPool.pas" ] \
   || { echo "external/pascal-common-faa vazio: git submodule update --init external/pascal-common-faa"; exit 1; }
 
+# Os espelhos FPCUnit sao gerados dos mestres DUnitX; aqui so' se confere que
+# estao em dia (o repositorio e' montado somente-leitura). Para regenerar:
+# python tools/gen_fpc_mirror.py (o tools/test_fpc.sh ja' faz isso).
+( cd "$ROOT" && python tools/gen_fpc_mirror.py --check )
+
 REDIS="pascal-redis-faa-ci-$$-$(date +%s)"
 trap 'docker rm -f "$REDIS" >/dev/null 2>&1 || true' EXIT
 docker run -d --rm --name "$REDIS" redis:7.2-alpine \
