@@ -36,6 +36,7 @@ uses
   Redis.PubSub in '..\..\src\Redis.PubSub.pas',
   Redis.Client in '..\..\src\Redis.Client.pas',
   Redis.Tracing in '..\..\src\Redis.Tracing.pas',
+  Redis.Lock in '..\..\src\Redis.Lock.pas',
   Redis.DUnitXCompat in 'Redis.DUnitXCompat.pas',
   Redis.TypesTests in 'Redis.TypesTests.pas',
   Redis.RespTests in 'Redis.RespTests.pas',
@@ -44,7 +45,8 @@ uses
   Redis.CommandsTests in 'Redis.CommandsTests.pas',
   Redis.TransactionTests in 'Redis.TransactionTests.pas',
   Redis.PubSubTests in 'Redis.PubSubTests.pas',
-  Redis.TracingTests in 'Redis.TracingTests.pas';
+  Redis.TracingTests in 'Redis.TracingTests.pas',
+  Redis.LockTests in 'Redis.LockTests.pas';
 
 var
   runner: ITestRunner;

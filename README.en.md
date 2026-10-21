@@ -126,6 +126,7 @@ begin
       WriteLn(LValue);
 
     // Distributed lock: SET NX PX returns null when someone else owns it.
+    // In an application, TRedisLock does this and the release (see "Distributed lock").
     LOptions := RedisDefaultSetOptions;
     LOptions.Condition := scNotExists;      // NX
     LOptions.Expiry := seMilliseconds;      // PX
@@ -387,6 +388,46 @@ trading kilobytes of Lua for 40 bytes. If the server has forgotten the script
 resends the `EVAL` by itself: the cache is an optimisation that **heals itself**, never an
 assumption about server state. `Eval`, `EvalSha`, `ScriptLoad`, `ScriptExists` and
 `ScriptFlush` remain available for driving the cycle by hand.
+
+### Distributed lock (`TRedisLock`)
+
+The two snippets above (`SET NX PX` with a token, and the script that releases) are what every
+application copied, together with a rule nobody wrote the same way twice: **an unavailable
+Redis is not "busy"**. Since 0.3.0 they live in the `Redis.Lock` unit:
+
+```pascal
+uses
+  Redis.Client, Redis.Lock;
+
+LLock := TRedisLock.Create(LClient, 'app:lock:');   // the client isn't the lock's
+case LLock.Acquire('order:7', 10000, LToken) of
+  rlAcquired:
+    try
+      ... // yours for up to 10 s
+    finally
+      LLock.Release('order:7', LToken);   // deletes only while it is still yours
+    end;
+  rlBusy:
+    ... // someone else holds it
+  rlUnavailable:
+    ... // Redis didn't answer: go on without the lock (if something else guarantees it) or refuse
+end;
+```
+
+- The token is random (32 hex digits), one per acquisition; `Release` and `Extend` (a new
+  deadline) run the scripts that compare the token before acting (`REDIS_LOCK_RELEASE_SCRIPT`,
+  `REDIS_LOCK_EXTEND_SCRIPT`).
+- **Only three exceptions mean unavailable**: `ERedisConnectionLost`, `ERedisTimeout` and
+  `ERedisPoolExhausted` (`RedisIsUnavailable`). `Acquire` returns them as `rlUnavailable`; any
+  other error (`WRONGTYPE`, a refused script) is a bug and propagates. `TryAcquire` is the
+  Boolean shortcut, and there unavailability raises. On a release, Redis being down is
+  `False`: the key expires by itself through its `PX`.
+- `OnUnavailable` gets the operation, the key (with the prefix) and the exception — **never
+  the token**, which would release someone else's lock.
+- It is a **single-instance** lock (one Redis), not Redlock: if the owner pauses longer than
+  the deadline, someone else may acquire. Where that matters, the lock only saves work and the
+  final word is something else's (pascal-agenda-faa, where it came from, lets the database
+  decide the slot).
 
 ### Pub/Sub
 
@@ -792,7 +833,8 @@ that is already gone (see section 50 of `docs/DECISOES.md`).
 
 ### `LockDistribuidoVcl`
 
-Distributed lock with `SET NX PX` and an ownership token. **Warning right on
+Distributed lock with `SET NX PX` and an ownership token, with raw commands on purpose: in an
+application, use `TRedisLock` (above), which runs the same scripts. **Warning right on
 the screen**: this is a **single-instance** lock (one Redis, no coordination
 across several) — it is not Redlock. If the owning process dies or pauses
 longer than the TTL, the guarantee goes down with it.

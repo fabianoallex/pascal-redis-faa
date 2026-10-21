@@ -235,6 +235,7 @@ src/Redis.Transaction.pas        TRedisTransaction: MULTI/EXEC/WATCH em um pipel
 src/Redis.PubSub.pas             TRedisSubscriber: conexão dedicada + thread de leitura + callbacks
 src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico + CreateSubscriber
 src/Redis.Tracing.pas            spans do OpenTelemetry (PascalCommon.Tracing): nome, texto sanitizado, atributos
+src/Redis.Lock.pas               TRedisLock (0.3.0): SET NX PX + token, release/extend por script, indisponivel != ocupado
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao

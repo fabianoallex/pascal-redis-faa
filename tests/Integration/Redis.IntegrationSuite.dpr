@@ -41,6 +41,7 @@ uses
   Redis.PubSub in '..\..\src\Redis.PubSub.pas',
   Redis.Client in '..\..\src\Redis.Client.pas',
   Redis.Tracing in '..\..\src\Redis.Tracing.pas',
+  Redis.Lock in '..\..\src\Redis.Lock.pas',
   Redis.DUnitXCompat in '..\Unit\Redis.DUnitXCompat.pas',
   Redis.IntegrationTests in 'Redis.IntegrationTests.pas';
 

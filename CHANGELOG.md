@@ -6,6 +6,29 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
+### Adicionado
+
+- **`TRedisLock`** (unit `Redis.Lock`): o lock distribuído de instância única que o README
+  mostrava em trechos. `Acquire(chave, ttlMs, out token)` devolve `rlAcquired`, `rlBusy` ou
+  `rlUnavailable`; `TryAcquire` é o atalho booleano (indisponibilidade levanta);
+  `Release(chave, token)` e `Extend(chave, token, ttlMs)` só agem enquanto a chave guarda o
+  token (scripts Lua `REDIS_LOCK_RELEASE_SCRIPT` e `REDIS_LOCK_EXTEND_SCRIPT`). `SET NX PX`
+  com um token aleatório por aquisição (`TRedisLock.NewToken`, 32 hex). **Só
+  `ERedisConnectionLost`, `ERedisTimeout` e `ERedisPoolExhausted` contam como indisponível**
+  (`RedisIsUnavailable`): qualquer outro erro sobe. `OnUnavailable` avisa com a operação e a
+  chave, nunca o token. Prefixo de chave opcional no construtor. Veio da pascal-agenda-faa
+  (`Agenda.Locks`), onde trava o horário de um agendamento na frente do banco.
+- 13 testes unitários (servidor falso: os bytes no fio e cada desfecho) e 4 de integração
+  (posse, token errado, prazo vencido, `Extend`, Redis fora numa porta sem servidor).
+
+### Alterado
+
+- O sample `LockDistribuidoVcl` usa os scripts da `Redis.Lock` e diz, no cabeçalho e no
+  README, que uma aplicação usa o `TRedisLock`; continua com os comandos crus de propósito
+  (tokens legíveis, o modo sem token e a armadilha do `DEL`).
+
 ## [0.2.0] - 2026-10-09
 
 ### Adicionado
@@ -109,7 +132,8 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.0...v0.1.1

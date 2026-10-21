@@ -142,6 +142,7 @@
         <DCCReference Include="..\..\src\Redis.PubSub.pas"/>
         <DCCReference Include="..\..\src\Redis.Client.pas"/>
         <DCCReference Include="..\..\src\Redis.Tracing.pas"/>
+        <DCCReference Include="..\..\src\Redis.Lock.pas"/>
         <DCCReference Include="Redis.DUnitXCompat.pas"/>
         <DCCReference Include="Redis.TypesTests.pas"/>
         <DCCReference Include="Redis.RespTests.pas"/>
@@ -151,6 +152,7 @@
         <DCCReference Include="Redis.TransactionTests.pas"/>
         <DCCReference Include="Redis.PubSubTests.pas"/>
         <DCCReference Include="Redis.TracingTests.pas"/>
+        <DCCReference Include="Redis.LockTests.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

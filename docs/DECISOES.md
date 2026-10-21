@@ -1213,6 +1213,41 @@ Testado em `Redis.TracingTests` (29 testes, sobre o servidor falso e o `TRedisFa
 um exportador que só guarda os spans) e num teste de integração que passa pela fachada, o
 pool e o pool dos bloqueantes contra o servidor de verdade.
 
+## 52. `TRedisLock`: o lock que toda aplicação copiava (0.3.0, 2026-10-21)
+
+A pascal-agenda-faa (a primeira aplicação real das libs `*-faa`) travou o horário de um
+agendamento com `SET NX PX` e o script de liberação do README, numa unit própria
+(`Agenda.Locks`), e listou o lock como candidato: o README e o sample mostravam os dois
+trechos, e cada aplicação os copiava junto com uma regra que nenhum trecho dizia. O usuário
+decidiu promovê-lo (2026-10-21).
+
+1. **Indisponível não é ocupado.** A regra que veio da agenda: só `ERedisConnectionLost`,
+   `ERedisTimeout` e `ERedisPoolExhausted` dizem "o Redis não pode responder agora"; qualquer
+   outro erro é bug (uma chave do tipo errado, um script recusado) e sobe. Lá, indisponível
+   deixava o agendamento seguir, porque o banco é a palavra final e o lock só poupa trabalho.
+   Essa é a decisão **da aplicação**, não da lib: aqui o `Acquire` só classifica
+   (`rlAcquired`, `rlBusy`, `rlUnavailable`) e quem chama escolhe seguir ou recusar. A agenda
+   devolvia `True` com token vazio para dizer indisponível — um booleano com três sentidos;
+   o enum diz isso sem truque.
+2. **`TryAcquire` também existe**, booleano, e nele a indisponibilidade levanta: é o atalho
+   para quem não tem plano B, e a exceção diz o que houve.
+3. **Liberar e estender nunca levantam por indisponibilidade.** A chave vence sozinha pelo
+   `PX`: uma liberação que falhou só a mantém presa até lá. `False` + `OnUnavailable`.
+4. **O token é um GUID em 32 hex**, um por aquisição, sem subir a pascal-common-faa mínima
+   (o `PascalCommon.Random` é da 1.15; a lib exige a 1.8). Ele é marca de posse, não segredo
+   criptográfico — mas também nunca vai para o evento nem para mensagem de erro, porque quem
+   o tem libera o lock.
+5. **`Extend` entrou** (não estava na agenda): o sample `LockDistribuidoVcl` já tinha o
+   script de renovação, e é o mesmo padrão do release.
+6. **O sample continua cru.** Tokens legíveis escolhidos na tela, o modo sem token e o `DEL`
+   direto são a lição dele, e o `TRedisLock` não deixa fazer nenhum dos três; o sample só
+   passou a usar os scripts da unit e a apontar para ela.
+
+Testado em `Redis.LockTests` (13, sobre o servidor falso: `SET` com `NX` e `PX` na ordem, a
+chave em `KEYS` e o token em `ARGV`, cada desfecho; a conexão que "fecha" do servidor falso é
+o `ERedisConnectionLost`) e em 4 testes de integração (posse única, token errado, prazo
+vencido, `Extend`, e um cliente numa porta sem Redis: `rlUnavailable`, nunca `rlBusy`).
+
 ---
 
 ## Compatibilidade e nomenclatura

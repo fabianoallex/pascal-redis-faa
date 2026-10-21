@@ -54,6 +54,7 @@ uses
   Redis.Commands.Streams,
   Redis.Commands.Scripting,
   Redis.Commands.PubSub,
+  Redis.Lock,
   Redis.Transaction,
   Redis.PubSub;
 
@@ -229,6 +230,14 @@ type
     procedure XClaim_MinIdleAlto_NaoRoubaTrabalhoEmAndamento;
     procedure EntradaApagada_ContinuaNaPelSemCampos;
     procedure XInfoGroups_EnxergaOGrupoEAPendencia;
+  end;
+
+  TRedisLockIntegrationTests = class(TTestCase)
+  published
+    procedure Lock_UmSoTemAPosseEOTokenErradoNaoLibera;
+    procedure Lock_PrazoVence_OutroAdquire;
+    procedure Lock_Extend_SoODonoEstende;
+    procedure Lock_RedisFora_IndisponivelNaoOcupado;
   end;
 
   TRedisTracingIntegrationTests = class(TTestCase)
@@ -1909,6 +1918,137 @@ begin
   end;
 end;
 
+{ --- 0.3.0: TRedisLock --- }
+
+procedure TRedisLockIntegrationTests.Lock_UmSoTemAPosseEOTokenErradoNaoLibera;
+var
+  LClient: TRedisClient;
+  LLock: TRedisLock;
+  LToken, LOutro: string;
+  LPttl: Int64;
+begin
+  LClient := NovoCliente;
+  LLock := TRedisLock.Create(LClient, PREFIXO);
+  try
+    LimpaChaves(LClient, ['lock:a']);
+    TAssert.AssertTrue('o primeiro adquire', LLock.Acquire('lock:a', 30000, LToken) = rlAcquired);
+    TAssert.AssertTrue('o segundo encontra ocupado', LLock.Acquire('lock:a', 30000, LOutro) = rlBusy);
+    LPttl := LClient.Keys.PTtl(Chave('lock:a'));
+    TAssert.AssertTrue('o PX foi aplicado', (LPttl > 0) and (LPttl <= 30000));
+    TAssert.AssertEquals(LToken, LClient.Strings.GetString(Chave('lock:a')));
+    TAssert.AssertFalse('outro token nao libera', LLock.Release('lock:a', 'nao-e-meu'));
+    TAssert.AssertTrue('o lock continua', LClient.Keys.Exists(Chave('lock:a')));
+    TAssert.AssertTrue('o dono libera', LLock.Release('lock:a', LToken));
+    TAssert.AssertFalse('o lock sumiu', LClient.Keys.Exists(Chave('lock:a')));
+    TAssert.AssertFalse('liberar de novo: ja nao e seu', LLock.Release('lock:a', LToken));
+  finally
+    LimpaChaves(LClient, ['lock:a']);
+    LLock.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisLockIntegrationTests.Lock_PrazoVence_OutroAdquire;
+var
+  LClient: TRedisClient;
+  LLock: TRedisLock;
+  LToken, LOutro: string;
+  LInicio: Int64;
+  LPegou: Boolean;
+begin
+  LClient := NovoCliente;
+  LLock := TRedisLock.Create(LClient, PREFIXO);
+  try
+    LimpaChaves(LClient, ['lock:b']);
+    TAssert.AssertTrue(LLock.TryAcquire('lock:b', 150, LToken));
+    // O dono "morreu" sem liberar: o PX devolve a chave. Espera por condicao,
+    // com prazo, nunca um Sleep fixo do tamanho do PX.
+    LPegou := False;
+    LInicio := PcTickMs;
+    while not LPegou and (PcTickMs - LInicio < 3000) do
+    begin
+      LPegou := LLock.TryAcquire('lock:b', 30000, LOutro);
+      if not LPegou then
+        Sleep(20);
+    end;
+    TAssert.AssertTrue('o PX venceu e outro adquiriu', LPegou);
+    // O dono antigo nao apaga o lock do novo.
+    TAssert.AssertFalse(LLock.Release('lock:b', LToken));
+    TAssert.AssertEquals(LOutro, LClient.Strings.GetString(Chave('lock:b')));
+  finally
+    LimpaChaves(LClient, ['lock:b']);
+    LLock.Free;
+    LClient.Free;
+  end;
+end;
+
+procedure TRedisLockIntegrationTests.Lock_Extend_SoODonoEstende;
+var
+  LClient: TRedisClient;
+  LLock: TRedisLock;
+  LToken: string;
+begin
+  LClient := NovoCliente;
+  LLock := TRedisLock.Create(LClient, PREFIXO);
+  try
+    LimpaChaves(LClient, ['lock:c']);
+    TAssert.AssertTrue(LLock.TryAcquire('lock:c', 1000, LToken));
+    TAssert.AssertFalse('outro token nao estende', LLock.Extend('lock:c', 'nao-e-meu', 60000));
+    TAssert.AssertTrue('o PX nao mudou', LClient.Keys.PTtl(Chave('lock:c')) <= 1000);
+    TAssert.AssertTrue('o dono estende', LLock.Extend('lock:c', LToken, 60000));
+    TAssert.AssertTrue('o novo PX', LClient.Keys.PTtl(Chave('lock:c')) > 1000);
+  finally
+    LimpaChaves(LClient, ['lock:c']);
+    LLock.Free;
+    LClient.Free;
+  end;
+end;
+
+type
+  TRedisLockAvisosIt = class
+  public
+    Total: Integer;
+    Classe: string;
+    procedure Aviso(ASender: TObject; const AOperation, AKey: string; AError: Exception);
+  end;
+
+procedure TRedisLockAvisosIt.Aviso(ASender: TObject; const AOperation, AKey: string;
+  AError: Exception);
+begin
+  Inc(Total);
+  Classe := AError.ClassName;
+end;
+
+procedure TRedisLockIntegrationTests.Lock_RedisFora_IndisponivelNaoOcupado;
+var
+  LParams: TRedisParams;
+  LClient: TRedisClient;
+  LLock: TRedisLock;
+  LAvisos: TRedisLockAvisosIt;
+  LToken: string;
+begin
+  // Uma porta onde nao ha' Redis: o lock diz "indisponivel", nunca "ocupado",
+  // e quem decide seguir sem ele e' a aplicacao.
+  LParams := ParamsDeTeste;
+  LParams.Port := 1;
+  LParams.ConnectTimeoutMs := 500;
+  LClient := TRedisClient.Create(LParams);
+  LLock := TRedisLock.Create(LClient, PREFIXO);
+  LAvisos := TRedisLockAvisosIt.Create;
+  try
+    LLock.OnUnavailable := LAvisos.Aviso;
+    TAssert.AssertTrue(LLock.Acquire('lock:d', 1000, LToken) = rlUnavailable);
+    TAssert.AssertEquals('', LToken);
+    TAssert.AssertFalse(LLock.Release('lock:d', 'qualquer'));
+    TAssert.AssertEquals(2, LAvisos.Total);
+    TAssert.AssertEquals('ERedisConnectionLost', LAvisos.Classe);
+  finally
+    LAvisos.Free;
+    LLock.Free;
+    LClient.Free;
+  end;
+end;
+
 { TRedisMensagensRecebidas }
 
 constructor TRedisMensagensRecebidas.Create;
@@ -2979,6 +3119,7 @@ initialization
   RegisterTest(TRedisPubSubIntegrationTests);
   RegisterTest(TRedisScriptingIntegrationTests);
   RegisterTest(TRedisStreamsIntegrationTests);
+  RegisterTest(TRedisLockIntegrationTests);
   RegisterTest(TRedisTracingIntegrationTests);
 
 end.

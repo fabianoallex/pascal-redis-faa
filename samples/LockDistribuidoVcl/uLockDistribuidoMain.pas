@@ -24,6 +24,13 @@ unit uLockDistribuidoMain;
   prazo estourar. Se alguem ja' tomou o lock, a renovacao falha e a propria
   tela desmarca o checkbox.
 
+  NUMA APLICACAO, use o TRedisLock (unit Redis.Lock, 0.3.0): ele faz o SET NX
+  PX com um token aleatorio, libera e estende pelos mesmos scripts que este
+  sample usa, e separa "ocupado" de "Redis indisponivel". O sample continua
+  com os comandos crus de proposito: tokens legiveis escolhidos na tela, o
+  modo sem token e o DEL direto sao a licao, e o TRedisLock nao deixa fazer
+  nenhum dos tres.
+
   Compila nos dois mundos a partir do MESMO fonte:
     FPC:    lazbuild LockDistribuidoVcl.lpi
     Delphi: abrir LockDistribuidoVcl.dproj no IDE
@@ -49,7 +56,7 @@ uses
   Graphics, Controls, Forms, Dialogs, StdCtrls, ExtCtrls,
   Redis.Types, PascalCommon.Threading, PascalCommon.ThreadPool,
   Redis.Transport, Redis.Client,
-  Redis.Commands.Strings, Redis.Commands.Keys, Redis.Commands.Scripting;
+  Redis.Commands.Strings, Redis.Commands.Keys, Redis.Commands.Scripting, Redis.Lock;
 
 type
   TfrmLockDistribuido = class(TForm)
@@ -166,21 +173,12 @@ const
   { O release classico: so' apaga se o valor guardado ainda for o MEU token.
     GET seguido de DEL, sem script, teria a corrida classica -- entre os dois
     comandos o lock pode expirar e ser tomado por outro processo, e o DEL
-    apagaria o lock DELE. }
-  SCRIPT_LIBERA =
-    'if redis.call("GET", KEYS[1]) == ARGV[1] then' + sLineBreak +
-    '  return redis.call("DEL", KEYS[1])' + sLineBreak +
-    'else' + sLineBreak +
-    '  return 0' + sLineBreak +
-    'end';
+    apagaria o lock DELE. E' o mesmo script do TRedisLock.Release. }
+  SCRIPT_LIBERA = REDIS_LOCK_RELEASE_SCRIPT;
 
-  { Mesma ideia para renovar: so' estica o TTL se o dono continuar sendo eu. }
-  SCRIPT_RENOVA =
-    'if redis.call("GET", KEYS[1]) == ARGV[1] then' + sLineBreak +
-    '  return redis.call("PEXPIRE", KEYS[1], ARGV[2])' + sLineBreak +
-    'else' + sLineBreak +
-    '  return 0' + sLineBreak +
-    'end';
+  { Mesma ideia para renovar: so' estica o TTL se o dono continuar sendo eu
+    (o do TRedisLock.Extend). }
+  SCRIPT_RENOVA = REDIS_LOCK_EXTEND_SCRIPT;
 
 { Token legivel: prefixo (quem sou eu) + relogio + numero aleatorio. Nao
   precisa ser um UUID -- so' precisa ser diferente a cada chamada e dar para

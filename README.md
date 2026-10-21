@@ -124,6 +124,7 @@ begin
       WriteLn(LValor);
 
     // Lock distribuído: SET NX PX devolve nulo quando outro já tem a posse.
+    // Numa aplicação, o TRedisLock faz isto e a liberação (ver "Lock distribuído").
     LOpcoes := RedisDefaultSetOptions;
     LOpcoes.Condition := scNotExists;      // NX
     LOpcoes.Expiry := seMilliseconds;      // PX
@@ -381,6 +382,45 @@ trocando kilobytes de Lua por 40 bytes. Se o servidor tiver esquecido o script
 reenvia o `EVAL` sozinha: o cache é uma otimização que **se autocorrige**, nunca uma
 suposição sobre o estado do servidor. `Eval`, `EvalSha`, `ScriptLoad`, `ScriptExists` e
 `ScriptFlush` continuam disponíveis para quem quiser controlar o ciclo à mão.
+
+### Lock distribuído (`TRedisLock`)
+
+Os dois trechos acima (o `SET NX PX` com token e o script que libera) são o que toda
+aplicação copiava, junto com uma regra que ninguém escrevia igual duas vezes: **Redis
+indisponível não é "ocupado"**. Desde a 0.3.0 eles moram na unit `Redis.Lock`:
+
+```pascal
+uses
+  Redis.Client, Redis.Lock;
+
+LLock := TRedisLock.Create(LClient, 'app:lock:');   // o cliente não é do lock
+case LLock.Acquire('pedido:7', 10000, LToken) of
+  rlAcquired:
+    try
+      ... // a posse é sua por até 10 s
+    finally
+      LLock.Release('pedido:7', LToken);   // só apaga se ainda for sua
+    end;
+  rlBusy:
+    ... // outro tem a posse
+  rlUnavailable:
+    ... // o Redis não respondeu: seguir sem lock (se outra coisa garante) ou recusar
+end;
+```
+
+- O token é aleatório (32 hex), um por aquisição; `Release` e `Extend` (novo prazo) rodam os
+  scripts que comparam o token antes de agir (`REDIS_LOCK_RELEASE_SCRIPT`,
+  `REDIS_LOCK_EXTEND_SCRIPT`).
+- **Só três exceções são indisponibilidade**: `ERedisConnectionLost`, `ERedisTimeout` e
+  `ERedisPoolExhausted` (`RedisIsUnavailable`). `Acquire` as devolve como `rlUnavailable`;
+  qualquer outro erro (`WRONGTYPE`, um script recusado) é bug e sobe. `TryAcquire` é o
+  atalho booleano, e nele a indisponibilidade levanta. Numa liberação, o Redis fora vira
+  `False`: a chave vence sozinha pelo `PX`.
+- `OnUnavailable` recebe a operação, a chave (com o prefixo) e a exceção — **nunca o
+  token**, que liberaria o lock de outro.
+- É lock de **instância única** (um Redis só), não Redlock: se o dono pausar por mais que o
+  prazo, outro pode adquirir. Onde isso importa, o lock só poupa trabalho e a palavra final é
+  de outra coisa (a pascal-agenda-faa, de onde ele veio, deixa o banco decidir o horário).
 
 ### Pub/Sub
 
@@ -780,7 +820,8 @@ rodaria contra a form já liberada (ver a seção 50 de `docs/DECISOES.md`).
 
 ### `LockDistribuidoVcl`
 
-Lock distribuído com `SET NX PX` e um token de posse. **Aviso na própria
+Lock distribuído com `SET NX PX` e um token de posse, com os comandos crus de propósito:
+numa aplicação, use o `TRedisLock` (acima), que usa os mesmos scripts. **Aviso na própria
 tela**: isto é um lock de **instância única** (um Redis só, sem coordenação
 entre vários) — não é Redlock. Se o processo dono morrer ou pausar por mais
 tempo que o TTL, a garantia cai junto.
