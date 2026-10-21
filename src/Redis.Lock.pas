@@ -6,7 +6,8 @@
 
   1. **Adquirir:** SET chave token NX PX ttl. NX garante "so' um chega
      primeiro"; PX garante que um dono que morreu nao prende a chave para
-     sempre. O token e' aleatorio (32 hex de um GUID), um por aquisicao.
+     sempre. O token e' aleatorio (16 bytes da fonte do sistema operacional,
+     PcRandomBytes, em 32 hex), um por aquisicao.
   2. **Liberar:** um script Lua que apaga a chave SO' enquanto ela ainda guarda
      o token de quem chama. GET seguido de DEL seria a corrida classica: entre
      os dois o lock pode expirar e ser tomado por outro, e o DEL apagaria o
@@ -84,7 +85,10 @@ type
     /// Novo prazo de ATtlMs se AKey ainda guarda AToken. Mesmos False de
     /// Release.
     function Extend(const AKey, AToken: string; ATtlMs: Integer): Boolean;
-    /// Um token novo (32 hex), o que Acquire usa.
+    /// Um token novo: 16 bytes de PcRandomBytes (BCryptGenRandom,
+    /// /dev/urandom) em 32 hex. Nunca CreateGUID: no FPC 3.2.2, em alguns
+    /// alvos Unix, ele cai no Random semeado pelo relogio, e dois processos
+    /// iniciados juntos poderiam gerar o mesmo token (0.3.1).
     class function NewToken: string; static;
     property Prefix: string read FPrefix;
     /// Chamado (na thread de quem chamou) quando o Redis nao respondeu.
@@ -108,6 +112,7 @@ function RedisIsUnavailable(E: Exception): Boolean;
 implementation
 
 uses
+  PascalCommon.Random,
   Redis.Pool,
   Redis.Commands.Strings,
   Redis.Commands.Scripting;
@@ -130,19 +135,20 @@ begin
 end;
 
 class function TRedisLock.NewToken: string;
+const
+  HEX: array[0..15] of Char = ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'a', 'b', 'c', 'd', 'e', 'f');
 var
-  LGuid: TGUID;
-  LText: string;
+  LBytes: TBytes;
   I: Integer;
 begin
-  if CreateGUID(LGuid) <> 0 then
-    raise ERedisException.Create('TRedisLock: CreateGUID falhou');
-  LText := GUIDToString(LGuid); // {XXXXXXXX-XXXX-...}
-  Result := '';
-  for I := 1 to Length(LText) do
-    if CharInSet(LText[I], ['0'..'9', 'A'..'F']) then
-      Result := Result + LText[I];
-  Result := LowerCase(Result);
+  LBytes := PcRandomBytes(16);
+  SetLength(Result, 32);
+  for I := 0 to 15 do
+  begin
+    Result[I * 2 + 1] := HEX[LBytes[I] shr 4];
+    Result[I * 2 + 2] := HEX[LBytes[I] and $0F];
+  end;
 end;
 
 procedure TRedisLock.Unavailable(const AOperation, AKey: string; AError: Exception);

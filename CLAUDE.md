@@ -73,8 +73,9 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
   sempre palavra inteira (`\b`) e `perl -pi`, nunca `sed -i` (troca CRLF por LF no Git
   for Windows — gotcha 3 da pascal-common-faa).
 - **A lib nunca embute a pascal-common-faa.** O `pascal_redis_faa.lpk` exige
-  `pascal_common_faa` **só pelo nome**, com `MinVersion` 1.8: a aplicação fornece a cópia
-  única. O submódulo `external/pascal-common-faa` (tag `v1.8.0`, checkout **sem**
+  `pascal_common_faa` **só pelo nome**, com `MinVersion` 1.15 (desde a 0.3.1: o token do
+  `TRedisLock` vem do `PascalCommon.Random`): a aplicação fornece a cópia
+  única. O submódulo `external/pascal-common-faa` (tag `v1.23.0`, checkout **sem**
   `--recursive`) existe para testes, samples e scripts. Os `.lpi` deles listam
   `pascal_common_faa` **primeiro**, com `DefaultFilename` em `external/` e `Prefer="True"`
   (sem o `Prefer`, um pacote registrado no IDE ganharia); os `.dproj` têm

@@ -655,10 +655,10 @@ LClient.Strings.SetValue('session:42', LToken);   // client span 'SET'
 ## Build
 
 **Dependency:** the library uses
-[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.8.0 or later**
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.15.0 or later**
 — the base shared by the `*-faa` libraries, which provides the monitor/condvar, the
 portable atomics, the monotonic clock, the thread pool (`TPcMonitor`, `PcAtomic*`,
-`PcTickMs`, `PcPool`) and the spans (`PascalCommon.Tracing`). **Your application** provides the copy, a single one for every
+`PcTickMs`, `PcPool`) the spans (`PascalCommon.Tracing`) and the lock token's random bytes (`PascalCommon.Random`, since 0.3.1). **Your application** provides the copy, a single one for every
 `*-faa` library it uses: on Lazarus, register `pascal_common_faa.lpk` (`pascal_redis_faa.lpk`
 requires it by name); on Delphi, put its `src` on the search path. A copy that is too old
 stops the build with a message saying so. This repository's

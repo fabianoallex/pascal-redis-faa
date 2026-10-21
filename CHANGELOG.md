@@ -6,6 +6,23 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-21
+
+### Corrigido
+
+- O token do `TRedisLock` vinha de `CreateGUID`, que no FPC 3.2.2, em alguns alvos Unix, cai no
+  `Random` semeado pelo relógio: dois processos iniciados juntos poderiam gerar o mesmo token, e
+  um liberaria (ou estenderia) o lock do outro — justo o que o token existe para impedir. Agora
+  são 16 bytes do `PcRandomBytes` da pascal-common-faa (`BCryptGenRandom` no Windows,
+  `/dev/urandom` no Unix), em 32 hex. O índice das libs `*-faa` já dizia "nunca `CreateGUID`";
+  a 0.3.0 não o seguiu.
+
+### Alterado
+
+- A versão mínima exigida da pascal-common-faa sobe de `1.8.0` para `1.15.0` (`PascalCommon.Random`;
+  checagem na `Redis.Types` e `MinVersion` do `.lpk`), e o submódulo `external/pascal-common-faa`
+  vai para a `v1.23.0`.
+
 ## [0.3.0] - 2026-10-21
 
 ### Adicionado
@@ -132,7 +149,8 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.1...v0.1.2

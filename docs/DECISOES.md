@@ -1233,10 +1233,12 @@ decidiu promovê-lo (2026-10-21).
    para quem não tem plano B, e a exceção diz o que houve.
 3. **Liberar e estender nunca levantam por indisponibilidade.** A chave vence sozinha pelo
    `PX`: uma liberação que falhou só a mantém presa até lá. `False` + `OnUnavailable`.
-4. **O token é um GUID em 32 hex**, um por aquisição, sem subir a pascal-common-faa mínima
-   (o `PascalCommon.Random` é da 1.15; a lib exige a 1.8). Ele é marca de posse, não segredo
-   criptográfico — mas também nunca vai para o evento nem para mensagem de erro, porque quem
-   o tem libera o lock.
+4. **O token são 16 bytes do `PcRandomBytes`, em 32 hex**, um por aquisição. A 0.3.0 usava um
+   GUID para não subir a pascal-common-faa mínima, e isso estava errado: no FPC 3.2.2, em alguns
+   alvos Unix, `CreateGUID` cai no `Random` semeado pelo relógio, e dois processos iniciados
+   juntos poderiam ter o mesmo token — um liberaria o lock do outro. Corrigido na 0.3.1, com o
+   mínimo na 1.15. O token é marca de posse, não segredo, mas também nunca vai para o evento nem
+   para mensagem de erro, porque quem o tem libera o lock.
 5. **`Extend` entrou** (não estava na agenda): o sample `LockDistribuidoVcl` já tinha o
    script de renovação, e é o mesmo padrão do release.
 6. **O sample continua cru.** Tokens legíveis escolhidos na tela, o modo sem token e o `DEL`
