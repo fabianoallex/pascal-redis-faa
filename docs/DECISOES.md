@@ -179,6 +179,10 @@ Custo aceito: correção de bug num transporte precisa ser portada manualmente p
 dois repos. Por isso cada unit copiada carrega um bloco de PROVENIENCIA no topo, dizendo de
 onde veio.
 
+**Superada.** A `Threading` foi para a pascal-common-faa na F8 (seção 50) e as três de
+transporte na 0.4.0 (seção 53): com a quarta cópia a caminho (pascal-kafka-faa), a lib comum
+passou a valer o acoplamento.
+
 ---
 
 ## 13. O mapa do RESP3 é guardado achatado (M1)
@@ -1249,6 +1253,79 @@ Testado em `Redis.LockTests` (13, sobre o servidor falso: `SET` com `NX` e `PX` 
 chave em `KEYS` e o token em `ARGV`, cada desfecho; a conexão que "fecha" do servidor falso é
 o `ERedisConnectionLost`) e em 4 testes de integração (posse única, token errado, prazo
 vencido, `Extend`, e um cliente numa porta sem Redis: `rlUnavailable`, nunca `rlBusy`).
+
+## 53. O transporte vem da pascal-common-faa (0.4.0, 2026-11-01)
+
+A família tinha três cópias de TCP + TLS (amqp, redis e pipes), e a pascal-kafka-faa seria a
+quarta. A pascal-common-faa extraiu a camada (`PascalCommon.Transport`, `.Tcp`, `.Posix`,
+`.Tls`, `.SChannel`, `.OpenSSL`), a partir da do pipes, que era a mais completa; as decisões
+T1–T8 estão no `docs/transport-design.md` de lá. Esta é a migração do redis, o "passo 3"
+daquele documento. A common só lança as units depois que pipes e redis passarem as suítes
+inteiras sobre elas (T8), então o submódulo aponta para a branch `transport`.
+
+1. **A `Redis.Connection` é a fronteira das exceções (T6).** Ela abre o endpoint
+   (`PcTcpConnect`, e `PcTlsWrap` por cima com `UseTls`), lê e escreve por um
+   `TPcEndpointStream`, e nenhuma `EPcTransport*` sai dela. Cada uma vira a `ERedis*` que já
+   saía antes: connect que falha → `ERedisConnectionLost`; `EPcTls` no handshake →
+   `ERedisTls`; prazo no handshake → `ERedisTimeout` nomeando a porta (o caso "TLS contra porta
+   plain" do M5); prazo de leitura ou escrita → `ERedisTimeout`; qualquer outra no meio de um
+   comando → `ERedisConnectionLost`. A mensagem é a da common (em inglês), dentro da da lib.
+   Não há fachada sobre o endpoint, ao contrário do pipes (a §26.2 de lá): no pipes a
+   aplicação lê do endpoint direto; aqui só a conexão o toca, e ela já traduzia tudo.
+2. **Um prazo por direção.** O redis tinha `SO_RCVTIMEO` e `SO_SNDTIMEO` separados, e o
+   assinante de pub/sub precisa dos dois: a leitura espera sem prazo (silêncio é o estado
+   normal de um canal), mas um `SUBSCRIBE` escrito para um servidor que parou de ler tem de
+   desistir. A common tinha um prazo só por endpoint (`SetIoDeadline`), e a leitora e a
+   escritora ajustando-o alternadamente seria corrida. **Corrigido lá**, na branch
+   `transport` (T8: a API ainda pode mudar de graça): `SetReadDeadline`/`SetWriteDeadline`,
+   cada um escrito só pela thread da sua direção. O T1 de lá esperava que o prazo único
+   cobrisse o send timeout daqui; cobre o prazo, não a separação.
+3. **O teste de "servidor que para de ler" (T1) não existia aqui**, e foi escrito: dois testes
+   de integração contra um listener no próprio processo que aceita e nunca lê (o Redis 7 vem
+   com o `DEBUG SLEEP` desligado, e não há outro jeito de mandá-lo parar de ler). Um valor fixo
+   de 64 MB **não travou** no loopback do Windows, nem com a conexão aceita (medido): os testes
+   escrevem blocos de 16 MB até o prazo disparar, como o escritor sem fim da common (32 MB
+   passaram numa rodada medida). O segundo teste tem a forma do pub/sub — leitora sem prazo,
+   escritora com prazo — e falha se a conexão usar um prazo só (conferido com a mutação).
+4. **O backend TLS é escolhido em runtime (T3).** `TRedisParams.TlsBackend`; `tbDefault` é
+   resolvido pela lib (`RedisDefaultTlsBackend`) porque é ela que sabe da diretiva:
+   `REDIS_OPENSSL` só troca o padrão para OpenSSL. No Windows os dois backends estão em todo
+   build, e o SmokeTest `--tls` passa pelos dois na mesma execução. Fora do Windows o OpenSSL
+   é o backend sem diretiva nenhuma — antes, um build Linux sem `-dREDIS_OPENSSL` não tinha TLS.
+   O campo não estava na lista do passo 3, e entrou porque sem ele a diretiva não teria padrão
+   para trocar.
+5. **CA privada e mTLS (o motivo de o kafka precisar da camada) entram como adição**:
+   `TlsCaFile`, `TlsCertFile`, `TlsKeyFile`, `TlsCertPassword`, vazios por padrão. O formato do
+   certificado próprio depende do backend (T7 de lá): par PEM no OpenSSL, PFX com senha no
+   SChannel. A CA é PEM nos dois.
+6. **O prazo do handshake TLS é o `ReceiveTimeoutMs`**, como era quando o handshake passava
+   pelo `SO_RCVTIMEO`. Zero (o assinante) vira o padrão da common (15 s), não "sem prazo": um
+   listener que nunca responde prenderia a thread. `ConnectTimeoutMs`, que existia sem efeito,
+   passou a ser o teto do connect. `TCP_NODELAY` vem ligado (o registro zerado da common).
+7. **O backoff de reconexão fica aqui (T5).** `PcTcpConnect` tenta cada endereço uma vez; quem
+   insiste é o `TRedisSubscriber` (pub/sub) ou o chamador — e o comando em voo continua não
+   sendo repetido (seção 4).
+8. **O que saiu.** `TRedisTcpSocket` e `TRedisSocketStream` (o socket é o `TPcEndpoint`), e as
+   classes de stream TLS. As units `Redis.Transport.Tls`/`.OpenSSL` ficam vazias por uma minor,
+   como no pipes. Com elas foi o bloco de proveniência da `pascal-amqp-faa`: o transporte não é
+   mais cópia de lá, e a regra de "portar a correção à mão para o outro lado" deixa de valer
+   para essas três units. Também foi a armadilha do `TSocket.ReceiveTimeout` do Delphi (só
+   valia com o socket já conectado): sockets crus não têm essa API, mas o teste de integração
+   que a pegava (`ReadTimeout_LevantaERedisTimeoutEInvalida`) continua.
+9. **A PKI de dev virou uma CA.** `tools/gen_certs.sh` gera CA, servidor, cliente e um cliente
+   fora da CA; o `docker-compose.tls.yml` usa `tls-auth-clients optional`, então a bateria sem
+   certificado e o mTLS dividem a porta 6380. O SmokeTest `--tls` deixou de desligar a
+   validação: cada conexão prova a cadeia e o nome contra a CA, e o "certificado fora da CA é
+   recusado pelo servidor" prova que o certificado do cliente vai mesmo no handshake.
+
+Medido: FPC 3.2.2 Windows x64, unitária 483/483 e integração 76/76 nos dois build modes, 0
+vazamentos; FPC 3.2.2 Linux (Debian 12), o mesmo, também três containers com `CPUS=1 RUNS=3`
+(18 de 18 rodadas); SmokeTest 151 passos em texto claro e 170 com `--tls` no Windows (fpc direto
+e lazbuild nos dois modes; SChannel e OpenSSL 3.2.4 no mesmo build), 151 e 165 no Linux (OpenSSL
+3.0). Os três samples GUI compilam no Lazarus. Delphi 12 (build no IDE, executáveis pela linha
+de comando), Win32 e Win64, configurações Debug (SChannel) e OpenSSL: unitária 483/483,
+integração 76/76, `Tests Leaked: 0` nas quatro; SmokeTest 151 e 170 com `--tls` nas quatro
+(OpenSSL 3.5.2 no Win32, 3.2.4 no Win64). Nenhum ajuste foi preciso depois da rodada Delphi.
 
 ---
 

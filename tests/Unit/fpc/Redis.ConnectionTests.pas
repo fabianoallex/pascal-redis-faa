@@ -28,7 +28,8 @@ uses
   Redis.Types,
   Redis.Resp,
   Redis.Connection,
-  Redis.Transport;
+  Redis.Transport,
+  PascalCommon.Transport;
 
 type
   { Servidor Redis de mentira: entrega respostas roteirizadas e grava o que o
@@ -133,6 +134,11 @@ type
     procedure DefaultTlsParams_TrocaAPortaELigaOTls;
     procedure DefaultTlsParams_MantemAVerificacaoLigada;
     procedure BackendTlsDesteBuild_SeIdentifica;
+    procedure DefaultParams_CamposDeTlsNovosNascemVazios;
+    procedure TlsOptions_LevaCaCertificadoEValidacao;
+    procedure TlsOptions_PrazoDoHandshakeEOReceiveTimeout;
+    procedure TlsOptions_BackendPadraoEODoBuild;
+    procedure TcpOptions_PrazoDoConnectENoDelay;
     procedure ConexaoAdotada_IgnoraUseTls;
   end;
 
@@ -1262,6 +1268,93 @@ begin
   // esta' dentro dele.
   TAssert.AssertTrue('e o Info carrega o nome dentro',
     Pos(LNome, RedisTlsBackendInfo) > 0);
+end;
+
+procedure TRedisTlsTests.DefaultParams_CamposDeTlsNovosNascemVazios;
+var
+  LParams: TRedisParams;
+begin
+  // Os campos da 0.4.0 entram como adicao: quem ja' preenchia os parametros
+  // com RedisDefaultParams continua com o mesmo comportamento (repositorio
+  // do sistema, sem certificado de cliente, backend padrao).
+  LParams := RedisDefaultParams;
+  TAssert.AssertEquals('', LParams.TlsCaFile);
+  TAssert.AssertEquals('', LParams.TlsCertFile);
+  TAssert.AssertEquals('', LParams.TlsKeyFile);
+  TAssert.AssertEquals('', LParams.TlsCertPassword);
+  TAssert.AssertTrue('backend padrao', LParams.TlsBackend = tbDefault);
+end;
+
+procedure TRedisTlsTests.TlsOptions_LevaCaCertificadoEValidacao;
+var
+  LParams: TRedisParams;
+  LTls: TPcTlsOptions;
+begin
+  LParams := RedisDefaultTlsParams;
+  LParams.TlsCaFile := 'ca.crt';
+  LParams.TlsCertFile := 'cliente.pfx';
+  LParams.TlsKeyFile := 'cliente.key';
+  LParams.TlsCertPassword := 'segredo';
+  LTls := RedisTlsOptions(LParams);
+  TAssert.AssertEquals('ca.crt', LTls.CaFile);
+  TAssert.AssertEquals('cliente.pfx', LTls.CertFile);
+  TAssert.AssertEquals('cliente.key', LTls.KeyFile);
+  TAssert.AssertEquals('segredo', LTls.CertPassword);
+  // TlsVerifyPeer e' o positivo; a common guarda o negativo (registro zerado
+  // = seguro). Inverter errado aqui desligaria a validacao em silencio.
+  TAssert.AssertFalse('validacao ligada', LTls.SkipServerVerification);
+  LParams.TlsVerifyPeer := False;
+  TAssert.AssertTrue('validacao desligada',
+    RedisTlsOptions(LParams).SkipServerVerification);
+end;
+
+procedure TRedisTlsTests.TlsOptions_PrazoDoHandshakeEOReceiveTimeout;
+var
+  LParams: TRedisParams;
+begin
+  // Ate' a 0.3.x quem limitava o handshake era o SO_RCVTIMEO; o prazo
+  // continua sendo o ReceiveTimeoutMs. Zero (o assinante de pub/sub, que le
+  // sem prazo) vira o padrao da common, nunca "sem prazo": um listener que
+  // nao responde prenderia a thread para sempre.
+  LParams := RedisDefaultTlsParams;
+  LParams.ReceiveTimeoutMs := 700;
+  TAssert.AssertEquals(700, Integer(RedisTlsOptions(LParams).HandshakeTimeoutMs));
+  LParams.ReceiveTimeoutMs := 0;
+  TAssert.AssertEquals(0, Integer(RedisTlsOptions(LParams).HandshakeTimeoutMs));
+end;
+
+procedure TRedisTlsTests.TlsOptions_BackendPadraoEODoBuild;
+var
+  LParams: TRedisParams;
+begin
+  // tbDefault chega a common ja' resolvido pela lib, porque e' a lib que
+  // sabe da diretiva REDIS_OPENSSL; a escolha explicita passa intacta.
+  LParams := RedisDefaultTlsParams;
+  TAssert.AssertTrue('tbDefault vira o padrao do build',
+    RedisTlsOptions(LParams).Backend = RedisDefaultTlsBackend);
+  TAssert.AssertTrue('o padrao do build e um backend concreto',
+    RedisDefaultTlsBackend <> tbDefault);
+  LParams.TlsBackend := tbOpenSsl;
+  TAssert.AssertTrue('escolha explicita passa intacta',
+    RedisTlsOptions(LParams).Backend = tbOpenSsl);
+  TAssert.AssertEquals('OpenSSL', RedisTlsBackendName(tbOpenSsl));
+end;
+
+procedure TRedisTlsTests.TcpOptions_PrazoDoConnectENoDelay;
+var
+  LParams: TRedisParams;
+  LTcp: TPcTcpOptions;
+begin
+  LParams := RedisDefaultParams;
+  LParams.ConnectTimeoutMs := 500;
+  LTcp := RedisTcpOptions(LParams);
+  TAssert.AssertEquals(500, Integer(LTcp.ConnectTimeoutMs));
+  // Nagle desligado (TCP_NODELAY): pipeline e request/reply pagariam o atraso.
+  TAssert.AssertFalse('TCP_NODELAY', LTcp.Nagle);
+  TAssert.AssertEquals('sem keep-alive', 0, Integer(LTcp.KeepAliveSeconds));
+  LParams.ConnectTimeoutMs := 0;
+  TAssert.AssertEquals('zero = padrao da common', 0,
+    Integer(RedisTcpOptions(LParams).ConnectTimeoutMs));
 end;
 
 procedure TRedisTlsTests.ConexaoAdotada_IgnoraUseTls;

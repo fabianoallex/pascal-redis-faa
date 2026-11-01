@@ -49,6 +49,8 @@ uses
   Classes,
   SyncObjs,
   PascalCommon.Threading,
+  PascalCommon.Transport,
+  PascalCommon.Transport.OpenSSL,
   Redis.Transport,
   Redis.Types,
   Redis.Resp,
@@ -149,16 +151,47 @@ begin
     Result[I] := AValores[I];
 end;
 
+var
+  /// docker/certs, com a barra no fim; preenchido por LocalizaCerts.
+  GCerts: string = '';
+
+{ A PKI de dev (tools/gen_certs.sh) mora em docker/certs, na raiz do repo. O
+  exe roda de lugares diferentes conforme o build (build/ no fpc direto,
+  samples/SmokeTest/ no lazbuild, Win64/Debug/ no Delphi), entao sobe a partir
+  da pasta dele ate achar. Sem ela, --tls nao roda: validar o servidor contra
+  a CA privada e' justamente o que a bateria cifrada tem de provar. }
+procedure LocalizaCerts;
+var
+  LDir, LPai: string;
+begin
+  LDir := ExcludeTrailingPathDelimiter(ExtractFilePath(ExpandFileName(ParamStr(0))));
+  while LDir <> '' do
+  begin
+    if FileExists(IncludeTrailingPathDelimiter(LDir) + 'docker' + PathDelim +
+      'certs' + PathDelim + 'ca.crt') then
+    begin
+      GCerts := IncludeTrailingPathDelimiter(LDir) + 'docker' + PathDelim +
+        'certs' + PathDelim;
+      Exit;
+    end;
+    LPai := ExcludeTrailingPathDelimiter(ExtractFilePath(LDir));
+    if LPai = LDir then
+      Break;
+    LDir := LPai;
+  end;
+  WriteLn('--tls precisa de docker/certs/ca.crt (rode: sh tools/gen_certs.sh)');
+  Halt(2);
+end;
+
 function Params: TRedisParams;
 begin
   if GUsaTls then
   begin
     Result := RedisDefaultTlsParams;   // ja vem com a porta 6380 e UseTls
-    // O cert de docker/certs e self-signed, entao a validacao de cadeia
-    // recusaria. A lib NAO tem atalho para isso de proposito: baixar a
-    // verificacao e uma decisao de seguranca e tem de aparecer numa linha
-    // explicita de quem a toma — esta aqui.
-    Result.TlsVerifyPeer := False;
+    // Validacao LIGADA, contra a CA privada de docker/certs (0.4.0): a
+    // bateria inteira prova a cadeia e o nome (localhost) a cada conexao,
+    // em vez de so' cifrar com a validacao desligada como ate' a 0.3.x.
+    Result.TlsCaFile := GCerts + 'ca.crt';
   end
   else
     Result := RedisDefaultParams;
@@ -768,6 +801,102 @@ end;
   nos parametros — cert recusado, porta trocada e carga grande o bastante para
   atravessar varios registros TLS.
   --------------------------------------------------------------------------- }
+{ Abre uma conexao e manda um PING. '' = deu certo; senao a classe da excecao
+  e a mensagem. A falha pode vir no Open (o cliente recusou, ou o servidor
+  recusou durante o handshake) ou no PING (no TLS 1.3 o servidor confere o
+  certificado do cliente DEPOIS de o cliente dar o handshake por encerrado, e
+  a recusa chega como alerta na primeira leitura). }
+function TentaPing(const AParams: TRedisParams): string;
+var
+  LConn: TRedisConnection;
+begin
+  Result := '';
+  LConn := TRedisConnection.Create(AParams);
+  try
+    try
+      LConn.Open;
+      if not LConn.Ping then
+        Result := 'PING sem PONG';
+    except
+      on E: Exception do
+        Result := E.ClassName + ': ' + E.Message;
+    end;
+  finally
+    LConn.Free;
+  end;
+end;
+
+{ O que a 0.4.0 trouxe ao TLS, por backend: CA privada (TlsCaFile) e
+  certificado de cliente (mTLS). No Windows os dois backends rodam no MESMO
+  build (TRedisParams.TlsBackend, escolhido em runtime); ate' a 0.3.x o
+  OpenSSL pedia outro build. O servidor do docker-compose.tls.yml usa
+  tls-auth-clients optional: cliente sem certificado entra, e quem apresenta
+  um tem de apresentar um da CA. }
+procedure ExercitaTlsBackend(ABackend: TPcTlsBackend);
+var
+  LParams: TRedisParams;
+  LNome, LErro: string;
+begin
+  LNome := RedisTlsBackendName(ABackend);
+  if (ABackend = tbOpenSsl) and not PcOpenSslAvailable(LErro) then
+  begin
+    WriteLn('  (', LNome, ' indisponivel nesta maquina, pulado: ', LErro, ')');
+    Exit;
+  end;
+
+  LParams := Params;
+  LParams.TlsBackend := ABackend;
+  LErro := TentaPing(LParams);
+  Passo(LNome + ': valida o servidor pela CA privada (TlsCaFile)',
+    LErro = '', ' -> ' + LErro);
+
+  // Pelo IP: o certificado tem SAN IP:127.0.0.1, e o nome conferido e' o Host.
+  LParams.Host := '127.0.0.1';
+  LErro := TentaPing(LParams);
+  Passo(LNome + ': e confere o nome tambem por IP (SAN)', LErro = '',
+    ' -> ' + LErro);
+
+  // Um arquivo de CA que nao e' a raiz da cadeia do servidor (o certificado
+  // do cliente): a validacao tem de recusar, e com ERedisTls.
+  LParams := Params;
+  LParams.TlsBackend := ABackend;
+  LParams.TlsCaFile := GCerts + 'client.crt';
+  LErro := TentaPing(LParams);
+  Passo(LNome + ': CA que nao assina o servidor e recusada com ERedisTls',
+    Pos('ERedisTls', LErro) = 1, ' -> ' + LErro);
+
+  // mTLS: o formato do certificado depende do backend (decisao T7 da
+  // pascal-common-faa): PEM + chave no OpenSSL, PFX + senha no SChannel.
+  LParams := Params;
+  LParams.TlsBackend := ABackend;
+  if ABackend = tbOpenSsl then
+  begin
+    LParams.TlsCertFile := GCerts + 'client.crt';
+    LParams.TlsKeyFile := GCerts + 'client.key';
+  end
+  else
+  begin
+    LParams.TlsCertFile := GCerts + 'client.pfx';
+    LParams.TlsCertPassword := 'redistest';
+  end;
+  LErro := TentaPing(LParams);
+  Passo(LNome + ': mTLS com certificado de cliente da CA', LErro = '',
+    ' -> ' + LErro);
+
+  // O contraprova de que o certificado vai mesmo no handshake: um
+  // self-signed, fora da CA, o servidor recusa.
+  if ABackend = tbOpenSsl then
+  begin
+    LParams.TlsCertFile := GCerts + 'rogue.crt';
+    LParams.TlsKeyFile := GCerts + 'rogue.key';
+  end
+  else
+    LParams.TlsCertFile := GCerts + 'rogue.pfx';
+  LErro := TentaPing(LParams);
+  Passo(LNome + ': mTLS com certificado fora da CA e recusado pelo servidor',
+    LErro <> '', ' -> ' + LErro);
+end;
+
 procedure ExercitaTls;
 var
   LParams: TRedisParams;
@@ -792,12 +921,14 @@ begin
     Pos(RedisTlsBackendName, RedisTlsBackendInfo) > 0,
     ' -> ' + RedisTlsBackendInfo);
 
-  { Certificado self-signed com a verificacao LIGADA tem de ser recusado. Se
-    este passo falhar, TlsVerifyPeer nao esta chegando ao backend — e o modo
-    seguro estaria aceitando qualquer certificado em silencio, que e a pior
-    falha possivel nesta camada. }
+  { Sem TlsCaFile, a validacao usa o repositorio do sistema, que nao conhece a
+    CA de dev: o certificado tem de ser recusado. Se este passo falhar,
+    TlsVerifyPeer nao esta chegando ao backend — e o modo seguro estaria
+    aceitando qualquer certificado em silencio, que e a pior falha possivel
+    nesta camada. }
   LParams := Params;
   LParams.TlsVerifyPeer := True;
+  LParams.TlsCaFile := '';
   LConn := TRedisConnection.Create(LParams);
   try
     LPegou := False;
@@ -811,7 +942,7 @@ begin
         LMensagem := E.Message;
       end;
     end;
-    Passo('cert self-signed com TlsVerifyPeer=True e recusado', LPegou,
+    Passo('sem TlsCaFile, o cert da CA de dev e recusado', LPegou,
       ' -> ' + LMensagem);
     Passo('e a conexao nao ficou aberta pela metade', not LConn.IsOpen);
   finally
@@ -910,6 +1041,12 @@ begin
   finally
     LPool.Free;
   end;
+
+  // O programa nao inclui o redis.inc, entao REDIS_WINDOWS nao existe aqui.
+  {$IF Defined(MSWINDOWS) or Defined(WINDOWS)}
+  ExercitaTlsBackend(tbSChannel);
+  {$IFEND}
+  ExercitaTlsBackend(tbOpenSsl);
 end;
 
 { ---------------------------------------------------------------------------
@@ -1517,6 +1654,8 @@ begin
   ReportMemoryLeaksOnShutdown := True;
   {$ENDIF}
   GUsaTls := LeArgumentoTls;
+  if GUsaTls then
+    LocalizaCerts;
   try
     Executa;
   except

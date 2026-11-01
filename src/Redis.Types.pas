@@ -29,7 +29,8 @@ interface
 
 uses
   SysUtils, Math,
-  PascalCommon.Version;
+  PascalCommon.Version,
+  PascalCommon.Transport;   // TPcTlsBackend (TRedisParams.TlsBackend)
 
 {$IF PASCALCOMMON_VERSION < 11500}
   {$MESSAGE FATAL 'pascal-redis-faa precisa da pascal-common-faa 1.15.0 ou mais nova'}
@@ -275,22 +276,42 @@ type
     /// Cifra a conexao com TLS. O Redis NAO faz upgrade em banda (nao existe
     /// STARTTLS): o servidor escuta TLS numa porta separada, entao ligar isto
     /// quase sempre anda junto com trocar a Port para REDIS_DEFAULT_TLS_PORT.
-    ///
-    /// O backend e' decidido em compilacao — SChannel no Windows, OpenSSL com
-    /// -dREDIS_OPENSSL em qualquer plataforma; ver RedisTlsBackendName. Num
-    /// build sem backend nenhum, abrir a conexao levanta ERedisTls em vez de
-    /// cair para texto claro.
     UseTls: Boolean;
 
-    /// Valida o certificado do servidor: cadeia de confianca do sistema mais
-    /// conferencia do nome contra Host. **Desligar aceita qualquer
-    /// certificado**, o que anula a defesa contra man-in-the-middle e deixa
-    /// apenas a cifragem do canal.
+    /// Valida o certificado do servidor: cadeia de confianca mais conferencia
+    /// do nome contra Host. A cadeia e' a do sistema, ou a de TlsCaFile quando
+    /// ela e' dada. **Desligar aceita qualquer certificado**, o que anula a
+    /// defesa contra man-in-the-middle e deixa apenas a cifragem do canal.
     ///
-    /// Existe por um motivo so': certificado self-signed em desenvolvimento (e'
-    /// o caso do docker/docker-compose.tls.yml). Em producao, instale a CA no
-    /// sistema e deixe isto em True.
+    /// Com uma CA privada (o caso de quase todo Redis auto-hospedado), o certo
+    /// e' TlsCaFile, nao desligar isto: desde a 0.4.0 a validacao funciona
+    /// contra ela nos dois backends.
     TlsVerifyPeer: Boolean;
+
+    /// CA em que confiar para o certificado do SERVIDOR, em PEM, no lugar do
+    /// repositorio do sistema. Vazio = repositorio do sistema. Mesmo formato
+    /// nos dois backends.
+    TlsCaFile: string;
+
+    /// Certificado do CLIENTE, para servidor com tls-auth-clients (mTLS).
+    /// Vazio = sem certificado. O formato depende do backend (decisao T7 da
+    /// pascal-common-faa): no OpenSSL, um PEM com o certificado e TlsKeyFile
+    /// com a chave; no SChannel, um PFX com a chave dentro e TlsCertPassword.
+    TlsCertFile: string;
+    /// Chave privada do certificado do cliente, em PEM. So' OpenSSL.
+    TlsKeyFile: string;
+    /// Senha do PFX do certificado do cliente. So' SChannel.
+    TlsCertPassword: string;
+
+    /// Qual implementacao de TLS usar, escolhida em runtime. tbDefault e'
+    /// SChannel no Windows e OpenSSL fora dele, ou OpenSSL em qualquer lugar
+    /// num build com -dREDIS_OPENSSL (ver RedisDefaultTlsBackend). tbSChannel
+    /// fora do Windows levanta ERedisTls ao abrir.
+    TlsBackend: TPcTlsBackend;
+
+    /// Teto para estabelecer a conexao TCP, todos os enderecos do nome
+    /// inclusos. Zero = o padrao da pascal-common-faa (10 s). O handshake TLS
+    /// nao entra aqui: ele tem o ReceiveTimeoutMs.
     ConnectTimeoutMs: Integer;
     /// Teto de espera por uma resposta. Zero desliga o timeout — nunca faca
     /// isso numa conexao do pool: um comando pendurado prende a conexao E a
@@ -340,15 +361,16 @@ function RedisDefaultParams: TRedisParams;
 /// de texto claro, que falha com uma mensagem de criptografia quando o problema
 /// era o numero da porta.
 ///
-/// TlsVerifyPeer continua True. Contra o certificado self-signed do
-/// docker-compose.tls.yml e' preciso desliga-lo numa linha explicita:
+/// TlsVerifyPeer continua True. Contra a CA privada do docker-compose.tls.yml,
+/// aponte TlsCaFile para ela:
 ///
 ///   LParams := RedisDefaultTlsParams;
-///   LParams.TlsVerifyPeer := False;   // so' em desenvolvimento
+///   LParams.TlsCaFile := 'docker/certs/ca.crt';
 ///
-/// Essa linha e' deliberadamente sua, e nao um atalho da lib: baixar a
-/// validacao do certificado e' uma decisao de seguranca, e ela tem que aparecer
-/// no diff de quem a tomou.
+/// Desligar a validacao (TlsVerifyPeer := False) continua possivel, numa
+/// linha deliberadamente sua, e nao num atalho da lib: baixar a validacao do
+/// certificado e' uma decisao de seguranca, e ela tem que aparecer no diff de
+/// quem a tomou.
 function RedisDefaultTlsParams: TRedisParams;
 
 implementation
@@ -511,6 +533,11 @@ begin
   Result.Protocol := rpRESP2;
   Result.UseTls := False;
   Result.TlsVerifyPeer := True;
+  Result.TlsCaFile := '';
+  Result.TlsCertFile := '';
+  Result.TlsKeyFile := '';
+  Result.TlsCertPassword := '';
+  Result.TlsBackend := tbDefault;
   Result.ConnectTimeoutMs := DEFAULT_TIMEOUT_MS;
   Result.ReceiveTimeoutMs := DEFAULT_TIMEOUT_MS;
   Result.SendTimeoutMs := DEFAULT_TIMEOUT_MS;

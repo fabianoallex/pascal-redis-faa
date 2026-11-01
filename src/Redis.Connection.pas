@@ -35,12 +35,22 @@
   conexao continua sa'. Execute levanta ERedisReplyError nesse caso; ExecuteRaw
   devolve o no' rkError para quem prefere ramificar sem excecao.
 
-  TLS (M5) nao muda nada do que esta' escrito acima: com UseTls, o stream do
-  socket ganha um envelope (TRedisSchannelStream ou TRedisOpenSslStream) e o
-  codec continua lendo de um TStream, sem saber que ha' cifra embaixo. Como o
-  envelope escreve e le pelo MESMO socket, fechar o socket continua
-  desbloqueando uma leitura pendurada — o Abort funciona igual nos dois
-  caminhos. }
+  TLS (M5) nao muda nada do que esta' escrito acima: com UseTls, o endpoint
+  TCP ganha um envelope TLS (PcTlsWrap) e o codec continua lendo de um
+  TStream (TPcEndpointStream), sem saber que ha' cifra embaixo. CloseAbort no
+  endpoint desbloqueia uma leitura pendurada nos dois caminhos — o Abort
+  funciona igual.
+
+  Desde a 0.4.0 o TCP e o TLS vem da pascal-common-faa (PascalCommon.Transport*)
+  e esta unit e' a FRONTEIRA das excecoes dela (decisao T6 do
+  transport-design.md de la'): nenhuma EPcTransport* sai daqui. Cada uma vira a
+  ERedis* que ja' saia antes, com a mensagem da common:
+    connect que falha           -> ERedisConnectionLost
+    EPcTls no handshake         -> ERedisTls
+    prazo no handshake TLS      -> ERedisTimeout (a mensagem nomeia a porta)
+    prazo de leitura/escrita    -> ERedisTimeout
+    qualquer outra, no meio     -> ERedisConnectionLost
+  Ver a secao 53 de docs/DECISOES.md. }
 
 {$I redis.inc}
 
@@ -50,39 +60,12 @@ uses
   SysUtils,
   Classes,
   SyncObjs,
+  PascalCommon.Transport,
   Redis.Types,
   Redis.Resp,
-  Redis.Transport
-  // Backend TLS deste build, decidido em COMPILACAO. O OpenSSL tem precedencia
-  // sobre o SChannel quando os dois estao disponiveis (e' o que a diretiva
-  // opt-in significa: "quero o OpenSSL mesmo no Windows"). Sem nenhum dos dois,
-  // nao ha' unit a referenciar e UseTls levanta ERedisTls explicando como
-  // habilitar.
-  {$IFDEF REDIS_OPENSSL}
-  , Redis.Transport.OpenSSL
-  {$ELSE}
-    {$IFDEF REDIS_WINDOWS}
-  , Redis.Transport.Tls
-    {$ENDIF}
-  {$ENDIF}
-  ;
+  Redis.Transport;
 
 type
-  /// Adapta TRedisTcpSocket a TStream.
-  ///
-  /// Existe porque os dois backends TLS (SChannel e OpenSSL) envolvem um
-  /// TStream, nao um socket: com esta casca, o caminho plain e o caminho TLS
-  /// tem exatamente o mesmo tipo daqui para cima. NAO e' dono do socket.
-  TRedisSocketStream = class(TStream)
-  private
-    FSocket: TRedisTcpSocket;
-  public
-    constructor Create(ASocket: TRedisTcpSocket);
-    function Read(var Buffer; Count: Longint): Longint; override;
-    function Write(const Buffer; Count: Longint): Longint; override;
-    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
-  end;
-
   /// Adapta um TStream ao IRedisByteSource que o TRedisReader consome.
   ///
   /// E' o ponto de encontro prometido no cabecalho da Redis.Resp: o codec nao
@@ -170,7 +153,7 @@ type
   private
     FParams: TRedisParams;
     FLock: TCriticalSection;
-    FSocket: TRedisTcpSocket;
+    FEndpoint: TPcEndpoint;   // nil numa conexao adotada (CreateOnStream)
     FStream: TStream;
     FAdopted: TStream;        // stream injetado ainda nao usado (ver CreateOnStream)
     FWasAdopted: Boolean;     // nasceu de CreateOnStream: nao sabe abrir socket
@@ -184,10 +167,8 @@ type
     FServerVersion: string;
     FServerId: Int64;
     procedure EstablishTransport;
-    /// Envolve o stream de bytes crus no backend TLS deste build. Assume a
-    /// posse de ARaw — inclusive quando falha, porque o destrutor do stream
-    /// TLS libera o stream de baixo.
-    function CreateTlsStream(ARaw: TStream): TStream;
+    /// TCP (+ TLS) pela pascal-common-faa, traduzindo as excecoes dela.
+    function ConnectEndpoint: TPcEndpoint;
     procedure Teardown;
     procedure Handshake;
     procedure MarkBroken;
@@ -360,6 +341,8 @@ implementation
 
 uses
   PascalCommon.Tracing,
+  PascalCommon.Transport.Tcp,
+  PascalCommon.Transport.Tls,
   Redis.Tracing;
 
 const
@@ -367,28 +350,14 @@ const
   /// mas ha' senha. E' o usuario que o 'requirepass' classico configura.
   REDIS_DEFAULT_USER = 'default';
 
-{ TRedisSocketStream }
-
-constructor TRedisSocketStream.Create(ASocket: TRedisTcpSocket);
+/// Milissegundos dos parametros -> prazo do endpoint (zero ou negativo =
+/// sem prazo, como era o SO_RCVTIMEO).
+function RedisDeadline(AMilliseconds: Integer): Cardinal;
 begin
-  inherited Create;
-  FSocket := ASocket;
-end;
-
-function TRedisSocketStream.Read(var Buffer; Count: Longint): Longint;
-begin
-  Result := FSocket.Receive(Buffer, Count);
-end;
-
-function TRedisSocketStream.Write(const Buffer; Count: Longint): Longint;
-begin
-  Result := FSocket.Send(Buffer, Count);
-end;
-
-function TRedisSocketStream.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
-begin
-  Result := 0;  // inalcancavel; so' cala o aviso de resultado nao atribuido
-  raise ERedisException.Create('TRedisSocketStream nao suporta Seek');
+  if AMilliseconds > 0 then
+    Result := Cardinal(AMilliseconds)
+  else
+    Result := 0;
 end;
 
 { TRedisStreamSource }
@@ -500,28 +469,49 @@ begin
   inherited;
 end;
 
-function TRedisConnection.CreateTlsStream(ARaw: TStream): TStream;
+function TRedisConnection.ConnectEndpoint: TPcEndpoint;
+var
+  LTcp: TPcEndpoint;
 begin
-  {$IFDEF REDIS_OPENSSL}
-  Result := TRedisOpenSslStream.Create(ARaw, FParams.Host, FParams.TlsVerifyPeer);
-  {$ELSE}
-    {$IFDEF REDIS_WINDOWS}
-  Result := TRedisSchannelStream.Create(ARaw, FParams.Host, FParams.TlsVerifyPeer);
-    {$ELSE}
-  // Build sem backend nenhum: fora do Windows e sem a diretiva opt-in. Melhor
-  // recusar alto e claro do que abrir em texto claro uma conexao que o
-  // chamador pediu cifrada — falha silenciosa aqui seria vazamento de senha.
-  Result := nil;
-  ARaw.Free;
-  raise ERedisTls.Create('este build nao tem backend TLS: fora do Windows, ' +
-    'recompile com -dREDIS_OPENSSL (ver RedisTlsBackendName)');
-    {$ENDIF}
-  {$ENDIF}
+  try
+    LTcp := PcTcpConnect(FParams.Host, FParams.Port, RedisTcpOptions(FParams));
+  except
+    // Recusa, nome que nao resolve, prazo do connect: para quem chamou e'
+    // tudo "nao alcancei o servidor". Re-tentar e' decisao de cima (T5).
+    on E: Exception do
+      raise ERedisConnectionLost.CreateFmt('nao conectou em %s:%d: %s',
+        [FParams.Host, FParams.Port, E.Message]);
+  end;
+  if not FParams.UseTls then
+    Exit(LTcp);
+  try
+    // PcTlsWrap e' dono de LTcp a partir daqui, inclusive quando levanta.
+    Result := PcTlsWrap(LTcp, FParams.Host, RedisTlsOptions(FParams));
+  except
+    // O caso mais comum de prazo NESTE ponto tem uma causa so': o
+    // ClientHello foi parar num listener de texto claro, que o leu como
+    // comando inline e nunca respondeu um ServerHello. Vale dizer isso na
+    // mensagem — sem ela o usuario procura problema no certificado quando o
+    // que errou foi o numero da porta.
+    on E: EPcTransportTimeout do
+      raise ERedisTimeout.CreateFmt(
+        'o handshake TLS com %s:%d estourou o prazo (%s); ' +
+        'essa porta escuta texto claro? (o Redis nao faz upgrade em ' +
+        'banda: TLS e plain sao portas diferentes)',
+        [FParams.Host, FParams.Port, E.Message]);
+    // ERedisTls sobe sem virar ERedisConnectionLost: "o socket abriu e a
+    // criptografia nao fechou" e' um diagnostico diferente de "nao alcancei
+    // o servidor", e leva a outra correcao (cert, CA, porta trocada).
+    on E: EPcTls do
+      raise ERedisTls.Create(E.Message);
+    on E: EPcTransport do
+      raise ERedisConnectionLost.CreateFmt(
+        'a conexao caiu durante o handshake TLS com %s:%d: %s',
+        [FParams.Host, FParams.Port, E.Message]);
+  end;
 end;
 
 procedure TRedisConnection.EstablishTransport;
-var
-  LRaw: TStream;
 begin
   if FAdopted <> nil then
   begin
@@ -536,68 +526,13 @@ begin
   end
   else
   begin
-    FSocket := TRedisTcpSocket.Create;
-    try
-      // Antes do Connect: os timeouts ficam guardados no socket e valem desde
-      // o primeiro byte lido — inclusive os do handshake TLS, que e' onde um
-      // servidor que aceita a conexao mas nao responde mais faria a thread
-      // parar para sempre. E' tambem o que impede o caso "TLS contra porta
-      // plain" de ficar pendurado: o servidor le o ClientHello como comando
-      // inline e nunca manda um ServerHello.
-      FSocket.SetReceiveTimeout(FParams.ReceiveTimeoutMs);
-      FSocket.SetSendTimeout(FParams.SendTimeoutMs);
-      FSocket.Connect(FParams.Host, FParams.Port);
-    except
-      on E: Exception do
-      begin
-        FreeAndNil(FSocket);
-        raise ERedisConnectionLost.CreateFmt('nao conectou em %s:%d: %s',
-          [FParams.Host, FParams.Port, E.Message]);
-      end;
-    end;
-
-    LRaw := TRedisSocketStream.Create(FSocket);
-    if not FParams.UseTls then
-      FStream := LRaw
-    else
-    begin
-      try
-        try
-          FStream := CreateTlsStream(LRaw);
-        except
-          // O transporte deixa passar a sua propria excecao de timeout (por
-          // decisao do M3: timeout nao e' fim de stream). Aqui ela precisa
-          // virar vocabulario da lib, como o Perform ja' faz no caminho dos
-          // comandos — ninguem deveria ter de capturar uma excecao da camada
-          // de socket para tratar "nao consegui abrir".
-          //
-          // E o caso mais comum de timeout NESTE ponto tem uma causa so': o
-          // ClientHello foi parar num listener de texto claro, que o leu como
-          // comando inline e nunca respondeu um ServerHello. Vale dizer isso
-          // na mensagem — sem ela o usuario procura problema no certificado
-          // quando o que errou foi o numero da porta.
-          on E: ERedisTransportTimeout do
-            raise ERedisTimeout.CreateFmt(
-              'o handshake TLS com %s:%d estourou o receive timeout; ' +
-              'essa porta escuta texto claro? (o Redis nao faz upgrade em ' +
-              'banda: TLS e plain sao portas diferentes)',
-              [FParams.Host, FParams.Port]);
-          on E: ERedisTransport do
-            raise ERedisConnectionLost.CreateFmt(
-              'a conexao caiu durante o handshake TLS com %s:%d: %s',
-              [FParams.Host, FParams.Port, E.Message]);
-        end;
-      except
-        // ERedisTls sobe INTACTA, sem virar ERedisConnectionLost: "o socket
-        // abriu e a criptografia nao fechou" e' um diagnostico diferente de
-        // "nao alcancei o servidor", e leva a outra correcao (cert, CA, porta
-        // trocada). O LRaw ja' foi liberado — pelo destrutor do stream TLS,
-        // que roda mesmo quando o construtor levanta, ou pelo proprio
-        // CreateTlsStream no caminho sem backend. O socket e' nosso.
-        FreeAndNil(FSocket);
-        raise;
-      end;
-    end;
+    FEndpoint := ConnectEndpoint;
+    // Um prazo por direcao, como eram SO_RCVTIMEO e SO_SNDTIMEO: o assinante
+    // de pub/sub le sem prazo (ReceiveTimeoutMs = 0) mas escreve com prazo.
+    // Valem a partir daqui; o handshake TLS ja' teve o dele.
+    FEndpoint.SetReadDeadline(RedisDeadline(FParams.ReceiveTimeoutMs));
+    FEndpoint.SetWriteDeadline(RedisDeadline(FParams.SendTimeoutMs));
+    FStream := TPcEndpointStream.Create(FEndpoint);
   end;
   FSource := TRedisStreamSource.Create(FStream);
   FReader := TRedisReader.Create(FSource);
@@ -605,15 +540,15 @@ end;
 
 procedure TRedisConnection.Teardown;
 begin
-  if FSocket <> nil then
-    FSocket.Close;
+  if FEndpoint <> nil then
+    FEndpoint.CloseAbort;
   FreeAndNil(FReader);
   // A interface segura o TRedisStreamSource, que aponta para o stream: soltar
   // a referencia ANTES de liberar o stream evita um source apontando para
   // memoria morta caso alguem ainda esteja com a interface na mao.
   FSource := nil;
-  FreeAndNil(FStream);
-  FreeAndNil(FSocket);
+  FreeAndNil(FStream);     // TPcEndpointStream nao e' dono do endpoint
+  FreeAndNil(FEndpoint);
   FOpen := False;
 end;
 
@@ -641,8 +576,8 @@ begin
   // leitura terminou.
   FBroken := True;
   FOpen := False;
-  if FSocket <> nil then
-    FSocket.Close;
+  if FEndpoint <> nil then
+    FEndpoint.CloseAbort;
 end;
 
 procedure TRedisConnection.EnsureUsable;
@@ -712,23 +647,31 @@ begin
       MarkLost(AMode);
       raise;
     end;
-    on E: ERedisTransportTimeout do
+    on E: EPcTransportTimeout do
     begin
-      // Estourou SO_RCVTIMEO/SO_SNDTIMEO. Invalida como qualquer outra falha,
-      // mas com a excecao propria: quem chamou precisa distinguir "o servidor
-      // caiu" de "o servidor esta lento demais" para decidir se aumenta o
-      // timeout ou se investiga o servidor. E a conexao vai embora nos dois
-      // casos, porque a resposta atrasada ainda pode chegar.
+      // Estourou o prazo de leitura ou de escrita do endpoint. Invalida como
+      // qualquer outra falha, mas com a excecao propria: quem chamou precisa
+      // distinguir "o servidor caiu" de "o servidor esta lento demais" para
+      // decidir se aumenta o timeout ou se investiga o servidor. E a conexao
+      // vai embora nos dois casos, porque a resposta atrasada ainda pode
+      // chegar.
       MarkLost(AMode);
       raise ERedisTimeout.CreateFmt('%s (host %s:%d)',
         [E.Message, FParams.Host, FParams.Port]);
     end;
+    on E: EPcTransport do
+    begin
+      // Fim de stream, CloseAbort (o Abort de outra thread), erro de socket ou
+      // falha de TLS no meio da sessao: o comando nao completou e a conexao
+      // acabou.
+      MarkLost(AMode);
+      raise ERedisConnectionLost.CreateFmt('%s (host %s:%d)',
+        [E.Message, FParams.Host, FParams.Port]);
+    end;
     on E: Exception do
     begin
-      // Sobra o que vem do transporte (ERedisTransport, ERedisTls, erro de
-      // socket da RTL). Do ponto de vista de quem chamou e' tudo a mesma
-      // coisa: o comando nao completou e a conexao acabou. Traduzir aqui
-      // poupa o chamador de conhecer as excecoes das camadas de baixo.
+      // Qualquer outra coisa vinda de baixo (um stream adotado, nos testes).
+      // Do ponto de vista de quem chamou e' a mesma situacao.
       MarkLost(AMode);
       raise ERedisConnectionLost.CreateFmt('%s: %s', [E.ClassName, E.Message]);
     end;
@@ -912,16 +855,17 @@ end;
 procedure TRedisConnection.Abort;
 begin
   // De proposito SEM o lock: quem chama isto quer justamente interromper a
-  // thread que esta' segurando o lock, parada num Receive. Fechar o socket faz
-  // a leitura devolver zero, e ela sobe como ERedisConnectionLost la'.
+  // thread que esta' segurando o lock, parada num Receive. O CloseAbort faz a
+  // leitura levantar EPcTransportClosed, que sobe como ERedisConnectionLost
+  // la'. Ele e' thread-safe e idempotente (contrato do TPcEndpoint).
   //
   // So' marca e derruba o socket; NAO libera reader nem stream, que a outra
   // thread pode estar usando neste instante. A faxina fica para o Perform que
   // falhar (MarkBroken), para o Close ou para o destrutor — todos sob o lock.
   FBroken := True;
   FOpen := False;
-  if FSocket <> nil then
-    FSocket.Close;
+  if FEndpoint <> nil then
+    FEndpoint.CloseAbort;
 end;
 
 function TRedisConnection.Execute(const AName: string;
@@ -1059,8 +1003,9 @@ begin
   FLock.Enter;
   try
     FParams.ReceiveTimeoutMs := AMilliseconds;
-    if FSocket <> nil then
-      FSocket.SetReceiveTimeout(AMilliseconds);
+    // Sob o lock, na thread que vai ler em seguida (contrato do endpoint).
+    if FEndpoint <> nil then
+      FEndpoint.SetReadDeadline(RedisDeadline(AMilliseconds));
   finally
     FLock.Leave;
   end;

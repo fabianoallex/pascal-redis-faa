@@ -5,12 +5,13 @@
   generics estilo Delphi, type helpers).
 
   REDIS_WINDOWS: definido quando o alvo e' Windows, em qualquer compilador
-  (Delphi define MSWINDOWS; FPC define WINDOWS). Usado para o transporte TLS
-  via SChannel, que e' exclusivo de Windows.
+  (Delphi define MSWINDOWS; FPC define WINDOWS).
 
-  REDIS_OPENSSL: opt-in do usuario (-dREDIS_OPENSSL). Troca o backend TLS para
-  OpenSSL em QUALQUER plataforma; tem precedencia sobre o SChannel se ambos
-  estiverem definidos. Fora do Windows e' a UNICA forma de ter TLS. }
+  REDIS_OPENSSL: opt-in do usuario (-dREDIS_OPENSSL). Desde a 0.4.0 so' muda
+  o backend TLS PADRAO para OpenSSL (TRedisParams.TlsBackend = tbDefault). Os
+  dois backends vem da pascal-common-faa e sao escolhidos em runtime: no
+  Windows os dois estao em todo build, e fora dele o OpenSSL e' o unico, com
+  ou sem a diretiva. Ver RedisDefaultTlsBackend na Redis.Transport. }
 
 {$IFDEF FPC}
   {$MODE DELPHI}

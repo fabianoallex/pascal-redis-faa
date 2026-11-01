@@ -11,8 +11,15 @@
   O que so' da' para verificar aqui, e nao nas suites unitarias:
 
   - **Read timeout de verdade.** Um BLPOP mais longo que o timeout da conexao
-    prova que o SO_RCVTIMEO foi mesmo aplicado no socket (o servidor falso nao
-    tem socket, logo nao tem como estourar timeout de socket).
+    prova que o prazo de leitura foi mesmo aplicado no socket (o servidor falso
+    nao tem socket, logo nao tem como estourar timeout de socket).
+  - **Send timeout de verdade** (0.4.0, decisao T1 do transport-design.md da
+    pascal-common-faa): um servidor que para de ler. O Redis nao tem como
+    parar de ler sob comando (o DEBUG SLEEP vem desligado no 7), entao quem
+    faz esse papel e' um listener no proprio processo que nunca aceita nem le:
+    o kernel completa a conexao, os buffers enchem e a escrita espera o prazo.
+    Inclui a forma do pub/sub: um leitor SEM prazo e um escritor COM prazo na
+    mesma conexao, que um prazo unico por endpoint nao conseguiria dizer.
   - **Conexao contaminada.** Depois do timeout, a resposta atrasada do BLPOP
     ainda esta' a caminho. Este e' o teste que o roadmap pede desde o M0: a
     conexao seguinte NAO pode receber essa resposta no lugar da dela.
@@ -36,6 +43,8 @@ uses
   Redis.Types,
   PascalCommon.Threading,
   PascalCommon.Tracing,
+  PascalCommon.Transport,
+  PascalCommon.Transport.Tcp,
   Redis.Connection,
   Redis.Pool,
   Redis.Client,
@@ -82,6 +91,22 @@ type
   end;
 
 
+  { Fica parada num TRedisConnection.Receive (o papel da thread de leitura do
+    pub/sub) e guarda a classe da excecao que a tirou de la'. }
+  TRedisLeitorDuplexIt = class(TThread)
+  private
+    FConn: TRedisConnection;
+    FClasse: string;
+  protected
+    procedure Execute; override;
+  public
+    Comecou: TEvent;
+    Terminou: TEvent;
+    constructor Create(AConn: TRedisConnection);
+    destructor Destroy; override;
+    property Classe: string read FClasse;
+  end;
+
   { Coleta o que o assinante entregou. Os callbacks rodam na thread de leitura
     do assinante, entao tudo aqui passa por lock — e a espera e' por condicao,
     nunca por Sleep fixo, que renderia teste lento e instavel. }
@@ -114,6 +139,8 @@ type
     [Test] procedure Resp3_HandshakeCompleto;
     [Test] procedure BancoInexistente_FalhaNoHandshake;
     [Test] procedure ReadTimeout_LevantaERedisTimeoutEInvalida;
+    [Test] procedure SendTimeout_ServidorQueParaDeLer_LevantaERedisTimeoutEInvalida;
+    [Test] procedure SendTimeout_FullDuplex_LeitorSemPrazoNaoHerdaODoEscritor;
     [Test] procedure ServidorDerrubaAConexao_ViraConnectionLost;
   end;
 
@@ -331,6 +358,88 @@ begin
   FRounds := ARounds;
 end;
 
+{ TRedisLeitorDuplexIt }
+
+constructor TRedisLeitorDuplexIt.Create(AConn: TRedisConnection);
+begin
+  FConn := AConn;
+  Comecou := TEvent.Create(nil, True, False, '');
+  Terminou := TEvent.Create(nil, True, False, '');
+  inherited Create(False);
+end;
+
+destructor TRedisLeitorDuplexIt.Destroy;
+begin
+  inherited Destroy;
+  Comecou.Free;
+  Terminou.Free;
+end;
+
+procedure TRedisLeitorDuplexIt.Execute;
+begin
+  try
+    try
+      Comecou.SetEvent;
+      FConn.Receive;
+    except
+      on E: Exception do
+        FClasse := E.ClassName;
+    end;
+  finally
+    Terminou.SetEvent;
+  end;
+end;
+
+{ Um servidor que nao le: escuta em 127.0.0.1, porta escolhida pelo sistema.
+  O teste aceita a conexao e segura o endpoint sem nunca ler. Aceitar importa:
+  no Windows, uma conexao deixada no backlog engoliu os 64 MB inteiros sem a
+  escrita esperar (medido), e o prazo de escrita nunca era testado. }
+function ListenerQueNaoLe: TPcListener;
+var
+  LOpts: TPcTcpOptions;
+begin
+  FillChar(LOpts, SizeOf(LOpts), 0);
+  Result := PcTcpListen('127.0.0.1', 0, LOpts);
+end;
+
+{ Parametros contra o listener mudo: sem ClientName (o CLIENT SETNAME do
+  handshake esperaria uma resposta que nunca vem) e em RESP2 sem senha, que
+  nao emite byte nenhum no Open. }
+function ParamsServidorMudo(APort: Word): TRedisParams;
+begin
+  Result := RedisDefaultParams;
+  Result.Host := '127.0.0.1';
+  Result.Port := APort;
+end;
+
+{ Manda SETs de 16 MB pela conexao, sem ler resposta (Send), ate' a escrita
+  falhar, como o escritor sem fim dos testes de transporte da
+  pascal-common-faa. Um valor fixo nao serve: no Windows o loopback engoliu
+  64 MB sem a escrita esperar (medido), e quanto ele aceita nao e'
+  documentado. Devolve a classe da excecao ('' se nunca travou) e quantos MB
+  foram aceitos antes; o teto de 2 GB transforma um prazo que nao dispara em
+  falha, e nao em teste pendurado. }
+function EscreveAteTravar(AConn: TRedisConnection; out AMegas: Integer): string;
+var
+  LValor: TBytes;
+  I: Integer;
+begin
+  Result := '';
+  AMegas := 0;
+  LValor := nil;
+  SetLength(LValor, 16 * 1024 * 1024);
+  try
+    for I := 1 to 128 do
+    begin
+      AConn.Send('SET', [Chave('nao-cabe'), LValor]);
+      Inc(AMegas, 16);
+    end;
+  except
+    on E: Exception do
+      Result := E.ClassName;
+  end;
+end;
+
 procedure TRedisPoolWorkerThread.Execute;
 var
   I: Integer;
@@ -538,6 +647,100 @@ begin
     TAssert.AssertFalse('e fora de uso', LConn.IsUsable);
   finally
     LConn.Free;
+  end;
+end;
+
+procedure TRedisConnectionIntegrationTests.SendTimeout_ServidorQueParaDeLer_LevantaERedisTimeoutEInvalida;
+var
+  LListener: TPcListener;
+  LServidor: TPcEndpoint;
+  LConn: TRedisConnection;
+  LParams: TRedisParams;
+  LClasse: string;
+  LMegas: Integer;
+begin
+  // O servidor para de ler: os buffers enchem e a escrita fica esperando
+  // espaco. Sem prazo de escrita, esta thread ficaria parada para sempre,
+  // segurando o lock da conexao (e, pelo pool, a vaga dela).
+  LListener := ListenerQueNaoLe;
+  try
+    LParams := ParamsServidorMudo(LListener.Port);
+    LParams.SendTimeoutMs := 300;
+    LServidor := nil;
+    LConn := TRedisConnection.Create(LParams);
+    try
+      LConn.Open;
+      LServidor := LListener.Accept;   // e nunca le
+      LClasse := EscreveAteTravar(LConn, LMegas);
+      TAssert.AssertEquals('depois de ' + IntToStr(LMegas) + ' MB aceitos',
+        'ERedisTimeout', LClasse);
+      // Metade do comando foi para o fio: a conexao nao tem conserto, e o
+      // proximo comando diz isso em vez de tentar.
+      TAssert.AssertTrue('devia estar invalidada', LConn.IsBroken);
+      LClasse := '';
+      try
+        LConn.Execute('PING');
+      except
+        on E: Exception do
+          LClasse := E.ClassName;
+      end;
+      TAssert.AssertEquals('ERedisConnectionLost', LClasse);
+    finally
+      LConn.Free;
+      LServidor.Free;
+    end;
+  finally
+    LListener.Free;
+  end;
+end;
+
+procedure TRedisConnectionIntegrationTests.SendTimeout_FullDuplex_LeitorSemPrazoNaoHerdaODoEscritor;
+var
+  LListener: TPcListener;
+  LServidor: TPcEndpoint;
+  LConn: TRedisConnection;
+  LParams: TRedisParams;
+  LLeitor: TRedisLeitorDuplexIt;
+  LClasse: string;
+  LMegas: Integer;
+begin
+  // A forma do assinante de pub/sub: uma thread parada no Receive, sem prazo
+  // (silencio e' o estado normal de um canal), e outra mandando um comando
+  // que o servidor nao le. O escritor tem de desistir pelo prazo DELE; o
+  // leitor nao pode ter desistido antes por um prazo que nao e' o dele. So'
+  // depois, quando o escritor derruba a conexao, o leitor sai — como queda.
+  LListener := ListenerQueNaoLe;
+  try
+    LParams := ParamsServidorMudo(LListener.Port);
+    LParams.ReceiveTimeoutMs := 0;
+    LParams.SendTimeoutMs := 300;
+    LServidor := nil;
+    LConn := TRedisConnection.Create(LParams);
+    try
+      LConn.Open;
+      LServidor := LListener.Accept;   // e nunca le nem escreve
+      LLeitor := TRedisLeitorDuplexIt.Create(LConn);
+      try
+        LLeitor.Comecou.WaitFor(10000);
+        LClasse := EscreveAteTravar(LConn, LMegas);
+        if LLeitor.Terminou.WaitFor(10000) <> wrSignaled then
+          LConn.Abort;
+        LLeitor.WaitFor;
+        // Com um prazo so' para as duas direcoes, o leitor estouraria junto
+        // (ERedisTimeout nele) e, derrubando a conexao, faria o escritor sair
+        // como queda: as duas classes abaixo trocariam.
+        TAssert.AssertEquals('o escritor, depois de ' + IntToStr(LMegas) +
+          ' MB aceitos', 'ERedisTimeout', LClasse);
+        TAssert.AssertEquals('o leitor', 'ERedisConnectionLost', LLeitor.Classe);
+      finally
+        LLeitor.Free;
+      end;
+    finally
+      LConn.Free;
+      LServidor.Free;
+    end;
+  finally
+    LListener.Free;
   end;
 end;
 

@@ -24,6 +24,7 @@ tests/Unit/fpc/RedisUnitTestsFpc
 # certificados do servidor TLS de dev (gerar localmente; ver docker/certs/README.md)
 docker/certs/*.crt
 docker/certs/*.key
+docker/certs/*.pfx
 
 # relatorio NUnit gerado pelo runner DUnitX
 dunitx-results.xml

@@ -13,8 +13,9 @@ Cliente **Redis** (protocolo RESP2/RESP3) para **Free Pascal/Lazarus e Delphi**,
 
 Projeto irmão da [`pascal-amqp-faa`](../pascal-amqp-faa) (cliente AMQP 0-9-1) e da
 `pascal-pipes-faa` (IPC), com as mesmas regras: codebase dual FPC 3.2.2 + Delphi 12,
-sem dependências externas, TLS nativo em Windows (SChannel) e OpenSSL opt-in em
-qualquer plataforma.
+sem dependências além da [`pascal-common-faa`](../pascal-common-faa) (de onde vêm a
+concorrência e, desde a 0.4.0, o TCP e o TLS), TLS nativo em Windows (SChannel) e OpenSSL
+em qualquer plataforma.
 
 ## O que o v1 entrega
 
@@ -24,7 +25,7 @@ qualquer plataforma.
 | Comandos | Keys, Strings, Hashes, Lists, Sets, ZSets, Streams |
 | Avançado | pipelining, `MULTI`/`EXEC`/`WATCH`, scripting (`EVAL`/`EVALSHA` com cache de SHA) |
 | Mensageria | Pub/Sub (conexão dedicada) e Streams com consumer groups |
-| Segurança | TLS via SChannel (Windows) ou OpenSSL (`-dREDIS_OPENSSL`, qualquer plataforma) |
+| Segurança | TLS via SChannel (Windows) ou OpenSSL (qualquer plataforma), escolhido em runtime; CA privada e mTLS |
 
 Comando de servidor (`PING`, `INFO`, `CONFIG`, `DBSIZE`) ainda não tem fachada própria —
 sai pelo `Execute` genérico, que alcança qualquer comando do Redis.
@@ -49,8 +50,8 @@ docker compose up -d                    # Redis em localhost:6379
 docker compose exec redis redis-cli ping
 ```
 
-Para o listener TLS (6380), gere os certs conforme `docker/certs/README.md` e suba
-com o override:
+Para o listener TLS (6380), gere a PKI de desenvolvimento com `sh tools/gen_certs.sh`
+(ver `docker/certs/README.md`) e suba com o override:
 
 ```
 docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
@@ -260,20 +261,20 @@ RESP3 é guardado achatado.
 
 ### TLS
 
-O backend é escolhido em **compilação**, nunca em runtime — um cliente que tenta um motor
-e cai para outro acaba usando, na máquina do usuário, um backend diferente do que foi
-testado:
+O TCP e o TLS vêm da `pascal-common-faa` (desde a 0.4.0). O backend é escolhido **em
+runtime**, por conexão, em `TRedisParams.TlsBackend` — e nunca por tentativa e queda: um
+cliente que tenta um motor e cai para outro acaba usando, na máquina do usuário, um backend
+diferente do que foi testado.
 
-| Build | Backend | Onde |
+| `TlsBackend` | Backend | Onde |
 |---|---|---|
-| padrão | SChannel (SSPI) | só Windows, sem DLL para distribuir |
-| `-dREDIS_OPENSSL` | OpenSSL (libssl/libcrypto) | qualquer plataforma, carregado dinamicamente |
-| nenhum dos dois | — | `UseTls` levanta `ERedisTls` explicando como habilitar |
+| `tbDefault` | SChannel no Windows, OpenSSL fora dele; OpenSSL em qualquer lugar num build com `-dREDIS_OPENSSL` | |
+| `tbSChannel` | SChannel (SSPI) | só Windows, sem DLL para distribuir; fora dele levanta `ERedisTls` |
+| `tbOpenSsl` | OpenSSL (libssl/libcrypto 3.x ou 1.1.1) | qualquer plataforma, carregado na primeira conexão |
 
-`RedisTlsBackendName` diz qual motor este build tem; `RedisTlsBackendInfo` acrescenta o
-detalhe de runtime que só o OpenSSL fornece — versão e o caminho da biblioteca que
-realmente carregou, que é o que resolve o dia em que a máquina tem três OpenSSL
-instalados e o errado venceu.
+`RedisTlsBackendName` diz qual motor o padrão deste build é; `RedisTlsBackendInfo` acrescenta
+o detalhe de runtime que o OpenSSL fornece — versão e a biblioteca que realmente carregou,
+que é o que resolve o dia em que a máquina tem três OpenSSL instalados e o errado venceu.
 
 ```pascal
 uses
@@ -283,28 +284,36 @@ var
   LParams: TRedisParams;
 begin
   LParams := RedisDefaultTlsParams;   // porta 6380 E UseTls, de uma vez
-  LParams.TlsVerifyPeer := False;     // só em desenvolvimento (cert self-signed)
+  LParams.TlsCaFile := 'ca.crt';      // CA privada (PEM); vazio = repositório do sistema
 
   LClient := TRedisClient.Create(LParams);
 ```
+
+**CA privada e mTLS.** `TlsCaFile` troca o repositório do sistema por uma CA em PEM (o caso de
+quase todo Redis auto-hospedado), nos dois backends, com a validação ligada. Para servidor com
+`tls-auth-clients`, o certificado do cliente vai em `TlsCertFile` — no formato do backend: par
+PEM (`TlsCertFile` + `TlsKeyFile`) no OpenSSL, PFX com senha (`TlsCertFile` +
+`TlsCertPassword`) no SChannel.
 
 **TLS no Redis não é upgrade em banda.** Não existe `STARTTLS`: o servidor abre um
 listener separado (`--tls-port`), e a conexão nasce cifrada ou não nasce. Por isso
 `RedisDefaultTlsParams` troca a porta *junto* com o `UseTls` — ligar um sem o outro manda
 um ClientHello para o listener de texto claro, que o lê como comando inline e nunca
-responde. Nesse caso o que salva é o read timeout, e a lib levanta `ERedisTimeout`
+responde. Nesse caso o que salva é o prazo do handshake (o `ReceiveTimeoutMs`), e a lib
+levanta `ERedisTimeout`
 **nomeando a troca de porta** como causa provável: a pista natural seria procurar defeito
 no certificado, e o erro está no número da porta.
 
 **`TlsVerifyPeer := False` aceita qualquer certificado** — mantém a cifragem e joga fora a
 defesa contra man-in-the-middle. A lib não oferece nenhum atalho que já venha com a
 validação desligada: `RedisDefaultTlsParams` mantém `TlsVerifyPeer := True`, e quem
-precisa baixá-la escreve a linha acima. É proposital — assim a decisão aparece no diff de
+precisa baixá-la escreve `LParams.TlsVerifyPeer := False` numa linha sua. Com uma CA privada,
+o certo é `TlsCaFile`, não desligar a validação. É proposital — assim a decisão aparece no diff de
 quem a tomou e num `grep` de quem for auditar, em vez de atravessar para produção
 escondida num nome de função amigável.
 
-Para exercitar contra o servidor de desenvolvimento, gere os certs (ver
-`docker/certs/README.md`), suba o override e rode o smoke test cifrado:
+Para exercitar contra o servidor de desenvolvimento, gere a PKI (`sh tools/gen_certs.sh`),
+suba o override e rode o smoke test cifrado:
 
 ```
 docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
@@ -312,9 +321,11 @@ SmokeTest.exe --tls
 ```
 
 `--tls` não é um modo com meia dúzia de passos extras: a bateria **inteira** passa a rodar
-por cima da criptografia, que é onde um envelope TLS mal-feito aparece — bulk de 512 KB
-atravessando vários registros TLS, pipeline numa escrita só, timeout de socket no meio de
-um registro.
+por cima da criptografia, validando o servidor contra a CA de `docker/certs` — que é onde um
+envelope TLS mal-feito aparece: bulk de 512 KB atravessando vários registros TLS, pipeline
+numa escrita só, timeout de socket no meio de um registro. A seção de TLS acrescenta, por
+backend (os dois no mesmo build, no Windows), a CA privada, a CA errada e o mTLS aceito e
+recusado.
 
 ### Transações (`MULTI`/`EXEC`/`WATCH`)
 
@@ -646,7 +657,7 @@ LCliente.Strings.SetValue('sessao:42', LToken);   // span client 'SET'
 [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.15.0 ou mais
 nova** — a base compartilhada pelas libs `*-faa`, de onde vêm o monitor/condvar, os
 atomics portáveis, o relógio monotônico, o pool de threads (`TPcMonitor`, `PcAtomic*`,
-`PcTickMs`, `PcPool`) os spans (`PascalCommon.Tracing`) e os bytes aleatórios do token do lock (`PascalCommon.Random`, desde a 0.3.1). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
+`PcTickMs`, `PcPool`) os spans (`PascalCommon.Tracing`) os bytes aleatórios do token do lock (`PascalCommon.Random`, desde a 0.3.1) e o TCP e o TLS (`PascalCommon.Transport*`, desde a 0.4.0). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
 libs `*-faa` que ela usar: no Lazarus, registre o `pascal_common_faa.lpk` (o
 `pascal_redis_faa.lpk` o exige pelo nome); no Delphi, ponha o `src` dela no search path.
 Uma cópia velha demais para o build com uma mensagem dizendo isso. O submódulo
@@ -669,7 +680,8 @@ fpc -Fusrc -Fisrc -Fuexternal\pascal-common-faa\src -Fiexternal\pascal-common-fa
 **Lazarus:** `lazbuild packages\pascal_redis_faa.lpk` (com o `pascal_common_faa.lpk`
 registrado) e depois os projetos; os `.lpi` de testes e samples já apontam para o
 submódulo e não precisam de registro. O build mode `openssl`
-(`lazbuild -B --build-mode=openssl <proj>.lpi`) troca o backend TLS.
+(`lazbuild -B --build-mode=openssl <proj>.lpi`) troca o backend TLS padrão (os dois existem
+em todo build; ver "TLS").
 
 **Delphi:** abrir `Redis.groupproj` no IDE (a Community Edition não compila por
 linha de comando). Os projetos já trazem `external\pascal-common-faa\src` no search path.
@@ -736,7 +748,7 @@ Sem parâmetros os executáveis abrem a interface gráfica com a árvore de test
 `0 unfreed memory blocks`):
 
 ```
-sh tools/test_fpc.sh            # Windows, lazbuild (BUILDMODE=openssl para o outro backend)
+sh tools/test_fpc.sh            # Windows, lazbuild (BUILDMODE=openssl: OpenSSL como padrão)
 sh tools/test_fpc_docker.sh     # Linux, FPC 3.2.2 num container
 ```
 
@@ -755,16 +767,16 @@ Precisa do container de pé (seção anterior).
 cd samples\SmokeTest
 lazbuild SmokeTest.lpi
 SmokeTest.exe          # 151 passos, texto claro (6379)
-SmokeTest.exe --tls    # 160 passos, tudo cifrado (6380) + a seção de TLS
+SmokeTest.exe --tls    # 170 passos no Windows (165 fora dele), tudo cifrado (6380) + a seção de TLS
 ```
 
 Sai com código 0 se todos os passos passarem, e 2 se receber um argumento
 desconhecido — um `--tsl` digitado errado rodaria em texto claro com cara de
 sucesso, que é justo o contrário do que se queria provar.
 
-O `--tls` precisa do override e dos certs (seção "TLS"). Vale rodá-lo nos dois
-backends: o build normal usa SChannel, e `lazbuild -B --build-mode=openssl
-SmokeTest.lpi` troca para OpenSSL.
+O `--tls` precisa do override e da PKI de `docker/certs` (seção "TLS"); sem o `ca.crt`, sai
+com código 2. No Windows ele passa pelos dois backends no mesmo build; o `lazbuild -B
+--build-mode=openssl SmokeTest.lpi` só troca qual é o padrão (o da bateria inteira).
 
 ## Samples GUI (VCL/LCL)
 

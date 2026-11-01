@@ -75,8 +75,12 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
 - **A lib nunca embute a pascal-common-faa.** O `pascal_redis_faa.lpk` exige
   `pascal_common_faa` **só pelo nome**, com `MinVersion` 1.15 (desde a 0.3.1: o token do
   `TRedisLock` vem do `PascalCommon.Random`): a aplicação fornece a cópia
-  única. O submódulo `external/pascal-common-faa` (tag `v1.23.0`, checkout **sem**
-  `--recursive`) existe para testes, samples e scripts. Os `.lpi` deles listam
+  única. O submódulo `external/pascal-common-faa` (checkout **sem** `--recursive`) existe
+  para testes, samples e scripts. **Na branch `transport-common` ele aponta para a branch
+  `transport` da common** (as units `PascalCommon.Transport*`, ainda não lançadas: decisão T8
+  do `docs/transport-design.md` de lá); fora dela, para a tag `v1.23.0`. Quando a common lançar
+  o transporte (1.27 ou mais nova), suba o mínimo para essa versão na `Redis.Types` e no
+  `MinVersion`. Os `.lpi` deles listam
   `pascal_common_faa` **primeiro**, com `DefaultFilename` em `external/` e `Prefer="True"`
   (sem o `Prefer`, um pacote registrado no IDE ganharia); os `.dproj` têm
   `..\..\external\pascal-common-faa\src` no search path.
@@ -95,55 +99,37 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
   só com comando + primeira chave. Todo span nasce e termina na mesma chamada e na mesma
   thread: é a regra de threads do tracer. Racional na seção 51 de `docs/DECISOES.md`.
 - **Correção na pascal-common-faa não se faz daqui.** O que precisar mudar lá vai para
-  `.ci/f8-findings-for-pascal-common-faa.md` (versionado).
+  `.ci/f8-findings-for-pascal-common-faa.md` (versionado), ou, no transporte enquanto ele não
+  for lançado, direto na branch `transport` de lá (foi assim com `SetReadDeadline`/
+  `SetWriteDeadline`, seção 53 de `docs/DECISOES.md`).
+- **Transporte (0.4.0):** TCP e TLS são `PcTcpConnect`/`PcTlsWrap`, e a conexão lê por
+  `TPcEndpointStream`. A `Redis.Connection` é a fronteira das exceções (T6): nenhuma
+  `EPcTransport*` sai da lib; cada uma vira `ERedisConnectionLost`, `ERedisTimeout` ou
+  `ERedisTls`, com a mensagem da common (em inglês) dentro. Um prazo por direção
+  (`SetReadDeadline`/`SetWriteDeadline`): o assinante de pub/sub lê sem prazo e escreve com
+  prazo. O backend TLS é escolhido em runtime (`TRedisParams.TlsBackend`); `REDIS_OPENSSL`
+  só muda o padrão. Racional na seção 53.
 
-## Peças herdadas da pascal-amqp-faa
+## Peças que vieram da pascal-amqp-faa (história)
 
-Três units foram copiadas e renomeadas (`AMQP.*` → `Redis.*`, `TAMQP*` → `TRedis*`,
-`Amqp*` → `Redis*`, `AMQP_*` → `REDIS_*`). Cada uma carrega um bloco de PROVENIENCIA logo
-após o include do `redis.inc`. **Sem dependência entre repositórios** — mesmo padrão do
-`Pipes.Threading.pas` na `pascal-pipes-faa`: correção de bug de um lado deve ser portada
-manualmente para o outro.
+Até a 0.3.x, `Redis.Transport`, `Redis.Transport.Tls` e `Redis.Transport.OpenSSL` eram
+cópias renomeadas das units da lib AMQP, com bloco de PROVENIENCIA e a regra de portar
+correção à mão. **Desde a 0.4.0 não são mais**: o transporte vem da pascal-common-faa (seção
+53 de `docs/DECISOES.md`), e a regra deixou de valer para elas.
 
-| Unit | Origem | Papel |
-|---|---|---|
-| `Redis.Transport` | `AMQP.Transport` | `TRedisTcpSocket`, `ERedisTransport`, `ERedisTls`, `RedisTlsBackendName/Info` |
-| `Redis.Transport.Tls` | `AMQP.Transport.Tls` | TLS via SChannel — só Windows (`REDIS_WINDOWS`, automático) |
-| `Redis.Transport.OpenSSL` | `AMQP.Transport.OpenSSL` | TLS via OpenSSL — qualquer plataforma, opt-in `-dREDIS_OPENSSL` |
+| Unit | Hoje |
+|---|---|
+| `Redis.Transport` | `ERedisTransport`/`ERedisTransportTimeout` (declaradas, não mais levantadas), `ERedisTls`, `RedisDefaultTlsBackend`, `RedisTcpOptions`, `RedisTlsOptions`, `RedisTlsBackendName/Info` |
+| `Redis.Transport.Tls` | vazia, **obsoleta**: só puxa `PascalCommon.Transport.SChannel`; sai na próxima minor |
+| `Redis.Transport.OpenSSL` | vazia, **obsoleta**: só puxa `PascalCommon.Transport.OpenSSL`; sai na próxima minor |
 
-**Mudança feita no transporte (M3, 2026-08-22):** `TRedisTcpSocket` ganhou
-`SetReceiveTimeout`/`SetSendTimeout` (`SO_RCVTIMEO`/`SO_SNDTIMEO`). No FPC via
-`fpsetsockopt` — DWORD de ms no Windows, `timeval` no Unix, que é a pegadinha da API; no
-Delphi pelas propriedades `ReceiveTimeout`/`SendTimeout` do `TSocket`, que já resolvem a
-diferença. Estourado o prazo, `Receive`/`Send` levantam **`ERedisTransportTimeout`** (nova,
-subclasse de `ERedisTransport`), que a `Redis.Connection` traduz para `ERedisTimeout`.
-Os dois backends TLS foram ajustados para **deixar essa exceção passar**: eles rebaixam
-qualquer erro a EOF, e rebaixar um timeout diria "o servidor encerrou" quando o que houve
-foi "eu desisti" — com a resposta ainda a caminho.
-
-**Armadilha do Delphi (custou uma rodada de teste):** `TSocket.ReceiveTimeout`/`SendTimeout`
-só valem se atribuídos com o socket **já conectado**. O `TSocket.Connect` faz
-`FSocket := CreateSocket`, e é dentro do `CreateSocket` que a RTL empurra os timeouts para o
-socket — usando o campo `FSocket`, que naquele instante ainda é `InvalidSocket`, porque só
-recebe o handle quando o `CreateSocket` retorna. O `setsockopt` vai para um handle inválido,
-falha, e a RTL descarta o resultado. Pior: o setter guarda o valor, então reatribuir o mesmo
-número depois vira no-op (`if FReceiveTimeout <> Value`) e não há segunda chance. Por isso o
-`ApplyTimeouts` só escreve a propriedade depois que `TSocketState.Connected` entra em
-`FSock.State`. **Sintoma:** FPC estoura o timeout certinho e o Delphi espera o comando
-inteiro (apareceu num `BLPOP` de 2 s com timeout de 300 ms).
-
-**Divergência introduzida no M5 (2026-08-22):** as oito mensagens de erro com
-acentuação nas duas units de TLS viraram ASCII (`validacao`, `conexao`, `nao`,
-`renegociacao`...). Motivo: app console FPC puro imprime UTF-8 num console
-cp850, e a mensagem que o usuário mais precisa ler — "validação do certificado
-falhou" — saía ilegível justo no momento da falha. É o mesmo motivo pelo qual as
-units escritas neste projeto já evitam acento em literal. **Se for portar
-correção para a `pascal-amqp-faa`, esta diferença é intencional.**
-
-Aviso conhecido e **pré-existente** (idêntico na lib AMQP, não foi introduzido pelo porte):
-`Redis.Transport.Tls.pas(617)` e `Redis.Transport.OpenSSL.pas(719)` — "Function result does
-not seem to be set". Não perseguir. (As linhas andam quando as units são editadas; o que
-identifica o aviso é a mensagem, não o número.)
+O que valia aqui e continua valendo como lição: **timeout tem exceção própria e não é
+rebaixado a fim de stream** ("eu desisti" não é "o servidor encerrou" — a resposta pode estar
+a caminho); a common mantém a classe através do TLS. **A armadilha do `TSocket` do Delphi**
+(`ReceiveTimeout`/`SendTimeout` só valiam atribuídos com o socket já conectado; sintoma: FPC
+estourava o timeout e o Delphi esperava o `BLPOP` inteiro) não existe com os sockets crus da
+common, mas o teste que a pegava (`ReadTimeout_LevantaERedisTimeoutEInvalida`) continua e
+tem de passar no Delphi.
 
 ## Regras da codebase dual (Delphi + FPC 3.2.2)
 
@@ -157,7 +143,7 @@ Toda unit começa com o include do `redis.inc` (ativa o mode Delphi no FPC e def
 | `System.TMonitor` (Enter/Wait/PulseAll) | `TPcMonitor` de `PascalCommon.ThreadPool` |
 | `TInterlocked.*` / `AtomicXxx` direto | `PcAtomicInc/Dec/Get/Set/CompareExchange/Read64/Write64` de `PascalCommon.Threading` |
 | `TThread.GetTickCount64` | `PcTickMs` de `PascalCommon.Threading` |
-| `System.Net.Socket` direto | `TRedisTcpSocket` de `Redis.Transport` |
+| `System.Net.Socket` direto | `PcTcpConnect`/`PcTlsWrap` da pascal-common-faa (só a `Redis.Connection` os chama) |
 | `TEncoding.UTF8.GetBytes/GetString` | `RedisUtf8Encode/Decode` (a criar no M1, em `Redis.Types`) |
 | uses com namespace (`System.SysUtils`) | nome curto (`SysUtils`); no Delphi resolve via unit scope names `System;Winapi` |
 | inline `var` em bloco | declarar no `var` da rotina |
@@ -182,7 +168,7 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
   única pista. Ler para a variável numa instrução separada, antes da chamada. (Era assim no
   `SmokeTest.dpr` do M0; corrigido no M1.)
 - `PWideChar(string)` não existe (string é Ansi) → campos que vão para APIs wide são
-  `UnicodeString` (ver `Redis.Transport.Tls.FTargetName`).
+  `UnicodeString` (era o caso do backend SChannel, hoje na pascal-common-faa).
 - **`TEncoding.UTF8.GetString` do Delphi LEVANTA em bytes que não são UTF-8 válido**, e o
   FPC não. O `TUTF8Encoding` nasce com `MB_ERR_INVALID_CHARS`, e o `TEncoding.GetString`
   tem um `if (ByteCount > 0) and (Len = 0) then raise EEncodingError`. Como o Redis guarda
@@ -196,8 +182,9 @@ Gotchas de FPC que valem aqui (lista completa no `CLAUDE.md` da `pascal-amqp-faa
 - Citar um diretivo de compilação dentro de um comentário de prosa entre chaves quebra a
   compilação: a chave de fechamento do texto citado fecha o comentário mais cedo. Escrever
   "condicional" em vez do diretivo literal.
-- **SIGPIPE no Linux**: `send()` num socket encerrado mata o processo. Já resolvido no
-  `Redis.Transport` copiado (`fpsend(..., MSG_NOSIGNAL)` sob FPC+Unix).
+- **SIGPIPE no Linux**: `send()` num socket encerrado mata o processo. Resolvido no
+  transporte da pascal-common-faa (`MSG_NOSIGNAL` sob FPC+Unix), como era no
+  `Redis.Transport` até a 0.3.x.
 - `TTestCase.AssertException` do FPCUnit exige a classe **exata** da exceção (não aceita
   subclasse, diferente do `Assert.WillRaise` do DUnitX). Para "qualquer exceção", usar
   `try/except` com flag booleana + `AssertTrue` — nunca `Fail()` dentro do próprio `try`.
@@ -215,9 +202,9 @@ Existentes (M0 a M8):
 
 ```
 src/redis.inc
-src/Redis.Transport.pas          (cópia renomeada; timeouts de socket no M3)
-src/Redis.Transport.Tls.pas      (cópia renomeada)
-src/Redis.Transport.OpenSSL.pas  (cópia renomeada)
+src/Redis.Transport.pas          excecoes de transporte, TRedisParams -> opcoes da common, nome do backend (0.4.0)
+src/Redis.Transport.Tls.pas      vazia, obsoleta (0.4.0)
+src/Redis.Transport.OpenSSL.pas  vazia, obsoleta (0.4.0)
 src/Redis.Types.pas              TRedisReplyKind, IRedisReply, TRedisArg, excecoes, params, Utf8Encode/Decode
 src/Redis.Resp.pas               codec RESP2/RESP3: RedisEncodeCommand, TRedisReader, IRedisByteSource
 src/Redis.Connection.pas         TRedisConnection (1 socket, handshake, Execute/ExecuteRaw, Send/Receive full-duplex), TRedisPipeline, TRedisSocketStream
@@ -260,7 +247,7 @@ nunca bloqueia o usuário da lib.
   `--recursive`; o submódulo dela não é preciso aqui).
 - **FPC direto:** `fpc -Fusrc -Fisrc -Fuexternal\pascal-common-faa\src
   -Fiexternal\pascal-common-faa\src -FEbuild -FUbuild samples\SmokeTest\SmokeTest.dpr`
-  (somar `-dREDIS_OPENSSL` para o backend OpenSSL). Compilador em
+  (somar `-dREDIS_OPENSSL` para OpenSSL como backend padrão). Compilador em
   `C:\lazarus4.0\fpc\3.2.2\bin\x86_64-win64\fpc.exe`.
 - **Pacote Lazarus:** `lazbuild packages\pascal_redis_faa.lpk` só compila sozinho com um
   `pascal_common_faa` registrado (`lazbuild --add-package-link
@@ -270,7 +257,7 @@ nunca bloqueia o usuário da lib.
   não conhecer o pacote da lib, registrar com
   `lazbuild --add-package-link packages\pascal_redis_faa.lpk`.
 - **Scripts das suítes FPC:** `sh tools/test_fpc.sh` (Windows, lazbuild; `BUILDMODE=openssl`
-  para o outro backend) e `sh tools/test_fpc_docker.sh` (Linux, FPC 3.2.2 em container;
+  para OpenSSL como padrão) e `sh tools/test_fpc_docker.sh` (Linux, FPC 3.2.2 em container;
   `CPUS=1 RUNS=5` e vários ao mesmo tempo para caçar corrida — cada execução sobe um Redis
   próprio, então não disputam servidor). Critério: 0 erros, 0 falhas e
   `0 unfreed memory blocks` no **arquivo** do heaptrc (`HEAPTRC=log=`). O heaptrc só foi
@@ -296,15 +283,20 @@ nunca bloqueia o usuário da lib.
   commite. Antes de fechar, volte a configuração para `Debug`, ou descarte o arquivo com
   `git checkout -- <proj>.dproj`.
 - **Servidor de teste:** `docker/docker-compose.yml` (redis:7.2-alpine, porta 6379) e o
-  override `docker-compose.tls.yml` (6380, precisa dos certs de `docker/certs`).
+  override `docker-compose.tls.yml` (6380, `tls-auth-clients optional`; precisa da PKI de
+  `docker/certs`, gerada por `sh tools/gen_certs.sh`: CA, servidor, cliente e um cliente fora
+  da CA).
   **Rode o SmokeTest após qualquer mudança na lib.**
 - **SmokeTest com TLS (M5):** `SmokeTest.exe --tls` roda a bateria INTEIRA contra o
-  listener cifrado (6380) em vez do de texto claro, e acrescenta a seção de TLS —
-  160 passos contra os 151 do modo plain. Desde o M7 ele vale ainda mais: pub/sub é o
+  listener cifrado (6380) em vez do de texto claro, validando o servidor contra o `ca.crt`
+  de `docker/certs` (desde a 0.4.0; antes desligava a validação), e acrescenta a seção de
+  TLS — 170 passos no Windows (165 fora dele) contra os 151 do modo plain. A seção de TLS
+  passa por CA privada, CA errada e mTLS aceito e recusado em **cada backend, no mesmo
+  build** (SChannel e OpenSSL no Windows). Desde o M7 ele vale ainda mais: pub/sub é o
   único caso em que uma thread lê e outra escreve no mesmo envelope TLS ao mesmo tempo.
-  Precisa dos certs e do override de pé:
-  `docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`. Rode nos
-  **dois backends**: build normal (SChannel) e `--build-mode=openssl` (OpenSSL).
+  Precisa da PKI e do override de pé:
+  `docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d`; sem o `ca.crt`
+  sai com exit code 2. O `--build-mode=openssl` só troca o backend da bateria inteira.
   Qualquer argumento que não seja `--tls` é recusado com exit code 2 — um `--tsl`
   digitado errado rodaria em texto claro com cara de sucesso.
 - **TLS fica FORA da suíte de integração**, de propósito: ela precisa valer com só o
