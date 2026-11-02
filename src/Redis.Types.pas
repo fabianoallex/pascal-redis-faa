@@ -32,8 +32,8 @@ uses
   PascalCommon.Version,
   PascalCommon.Transport;   // TPcTlsBackend (TRedisParams.TlsBackend)
 
-{$IF PASCALCOMMON_VERSION < 11500}
-  {$MESSAGE FATAL 'pascal-redis-faa precisa da pascal-common-faa 1.15.0 ou mais nova'}
+{$IF PASCALCOMMON_VERSION < 12700}
+  {$MESSAGE FATAL 'pascal-redis-faa precisa da pascal-common-faa 1.27.0 ou mais nova (transporte TCP/TLS)'}
 {$IFEND}
 
 const

@@ -7,9 +7,8 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 ## [Unreleased]
 
 O TCP e o TLS passam a vir da pascal-common-faa (`PascalCommon.Transport*`, passo 3 do
-`docs/transport-design.md` de lá). A common ainda não lançou essas units (decisão T8 de lá: só
-depois que pipes e redis passarem as suítes inteiras sobre elas), então o submódulo aponta para a
-branch `transport` e a versão mínima exigida continua `1.15.0` até o lançamento. Racional na
+`docs/transport-design.md` de lá). Exige a pascal-common-faa 1.27.0, que lançou essas units
+depois que pipes e redis passaram as suítes inteiras sobre elas (decisão T8 de lá). Racional na
 seção 53 de `docs/DECISOES.md`.
 
 ### Adicionado
