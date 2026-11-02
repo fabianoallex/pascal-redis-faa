@@ -6,6 +6,8 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-01
+
 O TCP e o TLS passam a vir da pascal-common-faa (`PascalCommon.Transport*`, passo 3 do
 `docs/transport-design.md` de lá). Exige a pascal-common-faa 1.27.0, que lançou essas units
 depois que pipes e redis passaram as suítes inteiras sobre elas (decisão T8 de lá). Racional na
@@ -204,7 +206,8 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.1.2...v0.2.0

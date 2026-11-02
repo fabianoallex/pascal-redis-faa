@@ -654,7 +654,7 @@ LCliente.Strings.SetValue('sessao:42', LToken);   // span client 'SET'
 ## Build
 
 **Dependência:** a lib usa a
-[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.15.0 ou mais
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.27.0 ou mais
 nova** — a base compartilhada pelas libs `*-faa`, de onde vêm o monitor/condvar, os
 atomics portáveis, o relógio monotônico, o pool de threads (`TPcMonitor`, `PcAtomic*`,
 `PcTickMs`, `PcPool`) os spans (`PascalCommon.Tracing`) os bytes aleatórios do token do lock (`PascalCommon.Random`, desde a 0.3.1) e o TCP e o TLS (`PascalCommon.Transport*`, desde a 0.4.0). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
