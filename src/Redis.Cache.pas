@@ -16,20 +16,29 @@
   mesmo RedisUtf8Encode/Decode de toda a lib. Put e' PSETEX (prazo em ms);
   TtlMs <= 0 apaga a chave e nao grava nada.
 
-  Contadores de tag (C4), sem TTL:
+  Contadores de tag (C4), com TTL (CounterTtlMs, um dia por padrao; 0.6.0,
+  fase F2.1 do design; ate' a 0.5.0 nao tinham):
 
   - Generations le todos num MGET, uma ida e volta. Contador ausente nasce com
-    SET NX valendo o horario Unix em ms DESTE processo (RedisUnixTimeMs) e e'
-    relido no mesmo pipeline (SET NX ... + MGET dos ausentes): quem perdeu a
-    corrida do SET NX le o valor de quem ganhou. Nunca nasce em 0. So' a
-    criacao custa a segunda ida e volta.
+    SET NX PX <CounterTtlMs> valendo o horario Unix em ms DESTE processo
+    (RedisUnixTimeMs) e e' relido no mesmo pipeline (SET NX PX ... + MGET dos
+    ausentes): quem perdeu a corrida do SET NX le o valor de quem ganhou.
+    Nunca nasce em 0. So' a criacao custa a segunda ida e volta. Ler NAO
+    renova o TTL: um contador lido o dia inteiro expira uma vez por dia, ao
+    custo de um miss por chave montada com ele.
   - Bump e' um script Lua: INCR so' no contador que EXISTE. O INCR puro numa
     chave ausente criaria o contador em 1, e as entradas gravadas sob 1, 2,
     3... antes de um eviction voltariam a ser lidas. Contador ausente fica
     ausente (o contrato permite): o proximo Generations o cria pelo relogio,
-    maior que qualquer valor que ele teve. Deixar ausente, e nao criar, tambem
-    impede que invalidar tags que ninguem le (uma por linha alterada) encha o
-    Redis de chaves sem TTL.
+    maior que qualquer valor que ele teve. O INCR preserva o TTL que o
+    contador ja' tem (o Redis nao mexe nele).
+  - Por que o TTL e' seguro: e' o argumento do C4. O contador que expira
+    renasce no relogio de quem o cria, acima de qualquer valor que teve, e as
+    entradas gravadas sob os valores antigos nao sao mais lidas. Vale se os
+    relogios das instancias diferem bem menos que o CounterTtlMs e se a tag
+    foi invalidada menos de 1000 vezes por segundo, em media, na vida do
+    contador. O CounterTtlMs deve ser maior que o TTL dos valores, senao todo
+    valor e' perdido quando o contador dele expira.
 
   Por que Lua so' no Bump (medido em 2026-11-04, Docker Desktop no Windows,
   ~0,5 ms por ida e volta): MGET, um script de leitura+criacao e um
@@ -42,7 +51,8 @@
   Relogio do contador novo: o do cliente, e nao o TIME do servidor (que
   custaria mais uma ida e volta na criacao). Instancias com relogios
   defasados de S ms enfraquecem a garantia do C4 em S ms; um contador so'
-  renasce depois de eviction ou restart, quando T1 - T0 costuma ser de horas.
+  renasce depois de expirar (CounterTtlMs), de eviction ou de restart, quando
+  T1 - T0 e' de horas.
 
   Erros (C6): o que diz "o Redis nao pode responder agora" vira
   EPcCacheUnavailable, que o TPcCache trata como miss: ERedisConnectionLost,
@@ -53,7 +63,7 @@
   aplicacao. A mensagem leva a classe original. ERedisReplyError (WRONGTYPE,
   um contador que nao e' numero) e ERedisTypeError sao bug e sobem como estao.
 
-  Racional na secao 54 de docs/DECISOES.md. }
+  Racional nas secoes 54 e 55 de docs/DECISOES.md. }
 
 {$I redis.inc}
 
@@ -72,6 +82,9 @@ uses
 {$IFEND}
 
 const
+  /// TTL padrao dos contadores de tag: um dia, em milissegundos.
+  REDIS_CACHE_COUNTER_TTL_MS = Int64(86400000);
+
   /// KEYS: os contadores. INCR so' nos que existem; os ausentes ficam ausentes.
   REDIS_CACHE_BUMP_SCRIPT =
     'for _, k in ipairs(KEYS) do ' +
@@ -83,15 +96,19 @@ type
   private
     FClient: TRedisClient;
     FOwnsClient: Boolean;
+    FCounterTtlMs: Int64;
     function DoTryGet(const AKey: string; out AValue: string): Boolean;
     procedure DoPut(const AKey, AValue: string; ATtlMs: Int64);
     function DoGenerations(const ATags: array of string): TArray<Int64>;
     procedure DoBump(const ATags: array of string);
   public
-    /// APool nao e' do store e tem de viver mais que ele.
-    constructor Create(APool: TRedisPool); overload;
+    /// APool nao e' do store e tem de viver mais que ele. ACounterTtlMs: TTL
+    /// com que um contador de tag nasce (> 0; padrao, um dia).
+    constructor Create(APool: TRedisPool;
+      ACounterTtlMs: Int64 = REDIS_CACHE_COUNTER_TTL_MS); overload;
     /// AClient nao e' do store (um cliente por processo, como no TRedisLock).
-    constructor Create(AClient: TRedisClient); overload;
+    constructor Create(AClient: TRedisClient;
+      ACounterTtlMs: Int64 = REDIS_CACHE_COUNTER_TTL_MS); overload;
     destructor Destroy; override;
     function TryGet(const AKey: string; out AValue: string): Boolean;
     procedure Put(const AKey, AValue: string; ATtlMs: Int64);
@@ -99,6 +116,7 @@ type
     function Generations(const ATags: array of string): TArray<Int64>;
     procedure Bump(const ATags: array of string);
     property Client: TRedisClient read FClient;
+    property CounterTtlMs: Int64 read FCounterTtlMs;
   end;
 
 /// Horario Unix em milissegundos (UTC), o valor com que um contador nasce.
@@ -182,22 +200,33 @@ begin
     Result[I] := AValues[I];
 end;
 
+procedure CheckCounterTtl(ATtlMs: Int64);
+begin
+  if ATtlMs <= 0 then
+    raise EArgumentOutOfRangeException.CreateFmt(
+      'TRedisCacheStore: ACounterTtlMs tem de ser maior que 0 (veio %d)', [ATtlMs]);
+end;
+
 { TRedisCacheStore }
 
-constructor TRedisCacheStore.Create(APool: TRedisPool);
+constructor TRedisCacheStore.Create(APool: TRedisPool; ACounterTtlMs: Int64);
 begin
   inherited Create;
   if APool = nil then
     raise EArgumentException.Create('TRedisCacheStore: APool e'' nil');
+  CheckCounterTtl(ACounterTtlMs);
+  FCounterTtlMs := ACounterTtlMs;
   FClient := TRedisClient.CreateOnPool(APool, False);
   FOwnsClient := True;
 end;
 
-constructor TRedisCacheStore.Create(AClient: TRedisClient);
+constructor TRedisCacheStore.Create(AClient: TRedisClient; ACounterTtlMs: Int64);
 begin
   inherited Create;
   if AClient = nil then
     raise EArgumentException.Create('TRedisCacheStore: AClient e'' nil');
+  CheckCounterTtl(ACounterTtlMs);
+  FCounterTtlMs := ACounterTtlMs;
   FClient := AClient;
   FOwnsClient := False;
 end;
@@ -291,7 +320,7 @@ begin
   if Length(LMissing) = 0 then
     Exit;
 
-  // Criacao: SET NX de cada ausente com o relogio, e o MGET deles no MESMO
+  // Criacao: SET NX PX de cada ausente com o relogio, e o MGET deles no MESMO
   // pipeline. Quem perdeu a corrida (outra instancia criou antes) le o valor
   // de quem ganhou; quem ganhou le o seu, ou um INCR que ja' veio depois.
   LNow := RedisUnixTimeMs;
@@ -302,7 +331,7 @@ begin
     for J := 0 to High(LMissing) do
     begin
       LMissingKeys[J] := ATags[LMissing[J]];
-      LPipeline.Queue('SET', [ATags[LMissing[J]], LNow, 'NX']);
+      LPipeline.Queue('SET', [ATags[LMissing[J]], LNow, 'NX', 'PX', FCounterTtlMs]);
     end;
     LPipeline.Queue('MGET', LMissingKeys);
     LReplies := FClient.ExecutePipeline(LPipeline);
@@ -319,7 +348,8 @@ begin
     if not LReply[J].IsNull then
       Result[I] := LReply[J].AsInteger
     else if LCreated then
-      // Criado e sumido antes do MGET (eviction no meio): o valor era LNow.
+      // Criado e sumido antes do MGET (expirou ou foi despejado no meio): o
+      // valor era LNow.
       Result[I] := LNow
     else
       // O SET NX achou a chave e o MGET a le como nula: ela existe, mas nao

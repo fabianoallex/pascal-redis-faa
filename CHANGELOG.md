@@ -6,6 +6,35 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-04
+
+Os contadores de tag do `TRedisCacheStore` passam a ter TTL (fase F2.1 do
+`docs/cache-design.md` da pascal-common-faa, "Decided after F3"), e saem as duas units que a
+0.4.0 deixou vazias. Racional na seção 55 de `docs/DECISOES.md`.
+
+### Alterado
+
+- **Contadores de tag do `TRedisCacheStore` expiram.** Um contador ausente nasce com
+  `SET NX PX <CounterTtlMs>` (ainda no horário Unix em ms e no mesmo pipeline do `MGET`), e
+  o construtor ganhou o parâmetro `ACounterTtlMs`, com padrão de um dia
+  (`REDIS_CACHE_COUNTER_TTL_MS` = 86 400 000): `TRedisCacheStore.Create(Pool)` continua
+  compilando e passa a criar contadores com TTL. Valor `<= 0` levanta
+  `EArgumentOutOfRangeException`. O `Bump` preserva o TTL que o contador tem (o `INCR` não
+  mexe nele) e uma leitura não o renova. Até a 0.5.0 os contadores não tinham TTL: uma tag
+  vinda de entrada do cliente deixava uma chave no Redis para sempre. Contadores criados
+  pela 0.5.0 continuam sem TTL até serem apagados; quem quiser que expirem pode apagá-los
+  (`DEL`), e o próximo `Generations` os recria pelo relógio, com TTL. Nenhuma mudança no
+  `IPcCacheStore` nem no `TPcCache`. Nova propriedade `CounterTtlMs`.
+
+### Removido
+
+- **As units `Redis.Transport.Tls` e `Redis.Transport.OpenSSL`**, vazias e obsoletas desde a
+  0.4.0 (o CHANGELOG dela prometia tirá-las na 0.5.0, e isso não foi feito). Quem as lista num
+  `uses` ou num `.dproj` tem de tirá-las; o TLS vem da pascal-common-faa
+  (`PascalCommon.Transport.SChannel` e `PascalCommon.Transport.OpenSSL`) e a `Redis.Connection`
+  já as usa. Nenhum dos repositórios `*-faa` (pascal-api-infra-faa, pascal-amqp-faa,
+  delphi-api-starter) as citava.
+
 ## [0.5.0] - 2026-11-04
 
 O store Redis do cache da pascal-common-faa 1.29.0 (`PascalCommon.Cache`, fase F2 do
@@ -229,7 +258,8 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.0...v0.3.1

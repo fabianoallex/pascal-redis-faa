@@ -274,9 +274,13 @@ type
     procedure Cache_PutGetDelete;
     procedure Cache_PrazoVence;
     procedure Cache_TtlZeroOuNegativo_ApagaENaoGrava;
-    procedure Cache_Generations_NasceDoRelogioSemTtl;
+    procedure Cache_Generations_NasceDoRelogioComTtl;
+    procedure Cache_Generations_LeituraNaoRenovaTtl;
     procedure Cache_Bump_AvancaEAusenteFicaAusente;
+    procedure Cache_Bump_PreservaTtl;
     procedure Cache_ContadorApagado_VoltaMaior_EntradaAntigaNaoELida;
+    procedure Cache_ContadorExpirado_VoltaMaior_EntradaAntigaNaoELida;
+    procedure Cache_CounterTtlInvalido_Levanta;
     procedure Cache_TextoNaoAscii_IdaEVoltaByteAByte;
     procedure Cache_ErroDeTipoOuDeResposta_Sobe;
     procedure Cache_RedisFora_ViraMissEOnError;
@@ -3371,6 +3375,46 @@ begin
     Sleep(1);
 end;
 
+// PTTL de uma chave no servidor: -2 ausente, -1 sem prazo.
+function PttlDe(AConn: TRedisConnection; const AKey: string): Int64;
+begin
+  Result := AConn.Execute('PTTL', [AKey]).AsInteger;
+end;
+
+// Espera a chave sumir do servidor (o TTL dela vencer), com prazo de 5 s.
+// True se sumiu.
+function EsperaChaveSumir(AConn: TRedisConnection; const AKey: string): Boolean;
+var
+  LPrazo: UInt64;
+begin
+  LPrazo := PcTickMs + 5000;
+  repeat
+    Result := AConn.Execute('EXISTS', [AKey]).AsInteger = 0;
+    if not Result then
+      Sleep(10);
+  until Result or (PcTickMs >= LPrazo);
+end;
+
+// True se criar o store com esse TTL de contador levanta EArgumentException.
+// AComCliente: a sobrecarga com TRedisClient, senao a com TRedisPool.
+function CounterTtlLevanta(APool: TRedisPool; AClient: TRedisClient;
+  AComCliente: Boolean; ATtlMs: Int64): Boolean;
+var
+  LStore: IPcCacheStore;
+begin
+  Result := False;
+  try
+    if AComCliente then
+      LStore := TRedisCacheStore.Create(AClient, ATtlMs)
+    else
+      LStore := TRedisCacheStore.Create(APool, ATtlMs);
+  except
+    on E: EArgumentException do
+      Result := True;
+  end;
+  LStore := nil;
+end;
+
 procedure TRedisCacheIntegrationTests.Cache_PutGetDelete;
 var
   LPool: TRedisPool;
@@ -3466,12 +3510,12 @@ begin
   end;
 end;
 
-procedure TRedisCacheIntegrationTests.Cache_Generations_NasceDoRelogioSemTtl;
+procedure TRedisCacheIntegrationTests.Cache_Generations_NasceDoRelogioComTtl;
 var
   LPool: TRedisPool;
   LStore: IPcCacheStore;
   LConn: TRedisConnection;
-  LAntes, LDepois: Int64;
+  LAntes, LDepois, LPttl: Int64;
   LGeracoes, LDeNovo: TArray<Int64>;
 begin
   LPool := TRedisPool.Create(ParamsDeTeste);
@@ -3488,15 +3532,68 @@ begin
     // Nunca em 0: nasce no horario Unix em ms (C4).
     TAssert.AssertTrue('a nasceu do relogio', (LGeracoes[0] >= LAntes) and (LGeracoes[0] <= LDepois));
     TAssert.AssertTrue('b nasceu do relogio', (LGeracoes[1] >= LAntes) and (LGeracoes[1] <= LDepois));
-    TAssert.AssertEquals('contador sem TTL', Int64(-1),
-      LConn.Execute('TTL', [Chave('cache:tag:a')]).AsInteger);
+    // SET NX PX: nasce com o TTL padrao, um dia (F2.1).
+    TAssert.AssertEquals(Int64(86400000), REDIS_CACHE_COUNTER_TTL_MS);
+    LPttl := PttlDe(LConn, Chave('cache:tag:a'));
+    TAssert.AssertTrue('PTTL de a: ' + IntToStr(LPttl),
+      (LPttl > 0) and (LPttl <= REDIS_CACHE_COUNTER_TTL_MS));
+    LPttl := PttlDe(LConn, Chave('cache:tag:b'));
+    TAssert.AssertTrue('PTTL de b: ' + IntToStr(LPttl),
+      (LPttl > 0) and (LPttl <= REDIS_CACHE_COUNTER_TTL_MS));
 
     // Relido, nao recriado; e a ordem segue a de ATags.
     LDeNovo := LStore.Generations([Chave('cache:tag:b'), Chave('cache:tag:a')]);
     TAssert.AssertEquals(LGeracoes[1], LDeNovo[0]);
     TAssert.AssertEquals(LGeracoes[0], LDeNovo[1]);
+
+    // Com um CounterTtlMs proprio, e' esse o prazo que vai ao servidor.
+    LStore := TRedisCacheStore.Create(LPool, 50000);
+    LStore.Generations([Chave('cache:tag:c')]);
+    LPttl := PttlDe(LConn, Chave('cache:tag:c'));
+    TAssert.AssertTrue('PTTL de c: ' + IntToStr(LPttl), (LPttl > 0) and (LPttl <= 50000));
   finally
-    Limpa(LConn, ['cache:tag:a', 'cache:tag:b']);
+    Limpa(LConn, ['cache:tag:a', 'cache:tag:b', 'cache:tag:c']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_Generations_LeituraNaoRenovaTtl;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LTag: string;
+  LGeracao, LPttlCriado, LPttlAntes, LPttlDepois: Int64;
+  LPrazo: UInt64;
+begin
+  LTag := Chave('cache:tag:leitura');
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    Limpa(LConn, ['cache:tag:leitura']);
+    LStore := TRedisCacheStore.Create(LPool, 60000);
+    LGeracao := LStore.Generations([LTag])[0];
+    LPttlCriado := PttlDe(LConn, LTag);
+    TAssert.AssertTrue('PTTL ' + IntToStr(LPttlCriado), LPttlCriado > 0);
+    // Espera o PTTL andar, para que uma renovacao (que o levaria de volta a
+    // 60000) se distinga de "nada mudou".
+    LPrazo := PcTickMs + 5000;
+    repeat
+      LPttlAntes := PttlDe(LConn, LTag);
+      if LPttlAntes >= LPttlCriado - 20 then
+        Sleep(5);
+    until (LPttlAntes < LPttlCriado - 20) or (PcTickMs >= LPrazo);
+    TAssert.AssertTrue('o PTTL nao andou', LPttlAntes < LPttlCriado - 20);
+
+    TAssert.AssertEquals(LGeracao, LStore.Generations([LTag])[0]);
+    TAssert.AssertEquals(LGeracao, LStore.Generations([LTag])[0]);
+    LPttlDepois := PttlDe(LConn, LTag);
+    TAssert.AssertTrue(Format('a leitura renovou o TTL: %d antes, %d depois',
+      [LPttlAntes, LPttlDepois]), (LPttlDepois > 0) and (LPttlDepois <= LPttlAntes));
+  finally
+    Limpa(LConn, ['cache:tag:leitura']);
     LConn.Free;
     LStore := nil;
     LPool.Free;
@@ -3524,6 +3621,38 @@ begin
     LStore.Bump([]);  // nada a fazer, nao vai ao servidor
   finally
     Limpa(LConn, ['cache:tag:x', 'cache:tag:ausente']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_Bump_PreservaTtl;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LTag: string;
+  LGeracao, LPttlAntes, LPttlDepois: Int64;
+begin
+  LTag := Chave('cache:tag:bumpttl');
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    Limpa(LConn, ['cache:tag:bumpttl']);
+    LStore := TRedisCacheStore.Create(LPool, 60000);
+    LGeracao := LStore.Generations([LTag])[0];
+    LPttlAntes := PttlDe(LConn, LTag);
+    TAssert.AssertTrue('PTTL ' + IntToStr(LPttlAntes), LPttlAntes > 0);
+    LStore.Bump([LTag]);
+    LStore.Bump([LTag]);
+    TAssert.AssertEquals(LGeracao + 2, LStore.Generations([LTag])[0]);
+    // O INCR do script nao mexe no TTL: nem tira (-1), nem renova (> antes).
+    LPttlDepois := PttlDe(LConn, LTag);
+    TAssert.AssertTrue(Format('PTTL %d antes do Bump, %d depois', [LPttlAntes, LPttlDepois]),
+      (LPttlDepois > 0) and (LPttlDepois <= LPttlAntes));
+  finally
+    Limpa(LConn, ['cache:tag:bumpttl']);
     LConn.Free;
     LStore := nil;
     LPool.Free;
@@ -3585,6 +3714,92 @@ begin
     LConn.Free;
     LCache := nil;
     LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_ContadorExpirado_VoltaMaior_EntradaAntigaNaoELida;
+const
+  TTL_CONTADOR_MS = 200;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LCache: IPcCache;
+  LConn: TRedisConnection;
+  LTag, LChave1, LChave2, LChave3, LValor: string;
+  LMaior, LRenascido, LPttl: Int64;
+begin
+  LTag := NOME_CACHE_IT + ':tag:categoria.ttl';
+  LChave1 := '';
+  LChave2 := '';
+  LChave3 := '';
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    LConn.Execute('DEL', [LTag]);
+    LStore := TRedisCacheStore.Create(LPool, TTL_CONTADOR_MS);
+    LCache := TPcCache.Create(LStore, NOME_CACHE_IT);
+
+    // Entradas com 60 s de TTL, muito mais que os 200 ms do contador.
+    LChave1 := LCache.Key('produto', ['categoria.ttl']);
+    LCache.Put(LChave1, 'velho', 60);
+    LCache.Invalidate(['categoria.ttl']);
+    LCache.Invalidate(['categoria.ttl']);
+    LChave2 := LCache.Key('produto', ['categoria.ttl']);
+    TAssert.AssertTrue(LChave2 <> LChave1);
+    LCache.Put(LChave2, 'velho2', 60);
+    TAssert.AssertTrue(LCache.TryGet(LChave2, LValor));
+    LMaior := LStore.Generations([LTag])[0];
+
+    // O contador expira sozinho: nenhum DEL aqui.
+    TAssert.AssertTrue('o contador nao expirou em 5 s', EsperaChaveSumir(LConn, LTag));
+    EsperaRelogioPassar(LMaior);
+
+    LChave3 := LCache.Key('produto', ['categoria.ttl']);
+    LRenascido := LStore.Generations([LTag])[0];
+    TAssert.AssertTrue(Format('renasceu em %d, ja'' tinha sido %d', [LRenascido, LMaior]),
+      LRenascido > LMaior);
+    // Renasceu com TTL de novo (-2: ja' expirou outra vez, numa maquina lenta).
+    LPttl := PttlDe(LConn, LTag);
+    TAssert.AssertTrue('PTTL do renascido: ' + IntToStr(LPttl),
+      (LPttl = -2) or ((LPttl > 0) and (LPttl <= TTL_CONTADOR_MS)));
+    TAssert.AssertTrue(LChave3 <> LChave1);
+    TAssert.AssertTrue(LChave3 <> LChave2);
+    TAssert.AssertFalse('a entrada antiga nao volta', LCache.TryGet(LChave3, LValor));
+    // Ela continua no Redis: quem a esconde e' a geracao.
+    TAssert.AssertTrue(LStore.TryGet(LChave2, LValor));
+    TAssert.AssertEquals('velho2', LValor);
+  finally
+    LConn.Execute('DEL', [LTag]);
+    if LChave1 <> '' then
+      LConn.Execute('DEL', [LChave1]);
+    if LChave2 <> '' then
+      LConn.Execute('DEL', [LChave2]);
+    if LChave3 <> '' then
+      LConn.Execute('DEL', [LChave3]);
+    LConn.Free;
+    LCache := nil;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_CounterTtlInvalido_Levanta;
+var
+  LPool: TRedisPool;
+  LClient: TRedisClient;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LClient := TRedisClient.Create(ParamsDeTeste);
+  try
+    TAssert.AssertTrue('pool, 0', CounterTtlLevanta(LPool, LClient, False, 0));
+    TAssert.AssertTrue('pool, -1', CounterTtlLevanta(LPool, LClient, False, -1));
+    TAssert.AssertTrue('cliente, 0', CounterTtlLevanta(LPool, LClient, True, 0));
+    TAssert.AssertTrue('cliente, -1', CounterTtlLevanta(LPool, LClient, True, -1));
+    TAssert.AssertFalse('pool, 1', CounterTtlLevanta(LPool, LClient, False, 1));
+    TAssert.AssertFalse('cliente, 1', CounterTtlLevanta(LPool, LClient, True, 1));
+  finally
+    LClient.Free;
     LPool.Free;
   end;
 end;

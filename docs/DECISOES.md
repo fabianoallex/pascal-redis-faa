@@ -1398,6 +1398,61 @@ de comando), Win32 e Win64, configurações Debug e OpenSSL: unitária 483/483, 
 
 ---
 
+## 55. Contadores de tag com TTL, e as units vazias saem (0.6.0, 2026-11-04)
+
+A F3 (pascal-api-infra-faa 0.32.0, o `TCachedTenantCatalog`) achou que ler uma chave cria os
+contadores das tags dela, e que no Redis eles ficavam para sempre: com uma tag vinda de entrada
+do cliente (`tenant:<id>`, um id qualquer num login), cada valor distinto deixava uma chave.
+O design da common decidiu dar TTL aos contadores ("Decided after F3" do `cache-design.md`); esta
+é a parte do redis da fase F2.1.
+
+1. **`SET NX PX <CounterTtlMs>`** na criação, no mesmo pipeline do `MGET` de antes, com o mesmo
+   relógio. É um parâmetro do construtor (`ACounterTtlMs`, nas duas sobrecargas) com padrão de
+   um dia (`REDIS_CACHE_COUNTER_TTL_MS`), então quem chamava `Create(Pool)` não muda nada.
+   `<= 0` levanta `EArgumentOutOfRangeException` (filha de `EArgumentException`, como a do pool
+   nulo), conferido antes de montar o cliente.
+2. **O `Bump` não mudou.** O script ainda incrementa só o contador que existe, e o `INCR`
+   preserva o TTL. Isso não foi suposto: o teste `Cache_Bump_PreservaTtl` lê o `PTTL` antes e
+   depois de dois `Bump` e exige que continue positivo e não maior que antes (nem tirado, nem
+   renovado).
+3. **Ler não renova** (decisão do design). Renovar custaria uma escrita em toda leitura, e um
+   contador lido o dia todo nunca expiraria, que é o caso que o TTL veio resolver. O preço é um
+   miss por chave quando o contador expira. O teste espera o `PTTL` andar (consultando, com
+   prazo) antes de ler, para que uma renovação se distinga de "nada mudou".
+4. **Por que é seguro:** o argumento do C4. O contador que expira renasce no relógio de quem o
+   cria, acima de qualquer valor que teve, e o que foi gravado sob os valores antigos não é mais
+   lido. Isso agora acontece todo dia, e não só depois de eviction, então as condições ficam
+   escritas no topo da unit: os relógios das instâncias diferem bem menos que o `CounterTtlMs`, e
+   a tag foi invalidada menos de 1000 vezes por segundo em média na vida do contador. O
+   `CounterTtlMs` deve ser maior que o TTL dos valores. A frase da seção 54, item 6 ("um contador
+   só renasce depois de eviction ou restart"), deixou de valer: renasce a cada `CounterTtlMs`.
+5. **Contadores da 0.5.0 continuam sem TTL**: o `MGET` os acha e o `SET NX` nunca roda para
+   eles. Não há migração automática (seria um `PEXPIRE` numa leitura, a escrita que o item 3
+   evita); quem quiser que expirem os apaga, e o próximo `Generations` os recria pelo relógio,
+   maiores e com TTL. Está no CHANGELOG.
+6. **Nenhuma mudança no `IPcCacheStore` nem no `TPcCache`**, como o design pedia.
+
+Na mesma minor saem a **`Redis.Transport.Tls` e a `Redis.Transport.OpenSSL`**, vazias desde a
+0.4.0 (seção 53). O CHANGELOG da 0.4.0 prometia tirá-las "na próxima minor", e a 0.5.0 não tirou.
+Antes da remoção, procurei quem as usava nos repositórios `*-faa` que dependem desta lib
+(pascal-api-infra-faa, pascal-amqp-faa, delphi-api-starter): ninguém. Aqui elas apareciam no
+`.lpk`, no `pascal_redis_faa.pas` e nos `.dpr`/`.dproj` das duas suítes Delphi. Remoção de API numa
+0.x é minor, daí 0.6.0.
+
+Testado em quatro testes de integração novos (`TRedisCacheIntegrationTests`, agora 15): o
+contador nasce com `PTTL` entre 0 e o `CounterTtlMs` (o padrão e um próprio, 50 s); a leitura não
+renova; o `Bump` preserva; e, com `CounterTtlMs` de 200 ms, o contador expira **sozinho** (a espera
+consulta o `EXISTS` com prazo de 5 s, sem `Sleep` fixo), renasce maior que qualquer valor que teve,
+e a entrada gravada sob o valor antigo, ainda no Redis com 60 s de prazo, não é lida pelo
+`TPcCache`. Mais o `CounterTtlMs` 0 e negativo levantando nas duas sobrecargas. O teste de
+geração passou de "sem TTL" para "com TTL".
+
+Medido: FPC 3.2.2 Windows x64, unitária 483/483 e integração 91/91 (também no build mode
+`openssl`), 0 vazamentos; FPC 3.2.2 Linux (Debian 12), o mesmo, e quatro containers ao mesmo
+tempo com `CPUS=1 RUNS=5` (20 de 20 rodadas da integração); SmokeTest 151 passos. Delphi 12 CE (build no IDE, executáveis pela linha de comando), Win32 e Win64, configurações Debug e OpenSSL: unitária 483/483, integração 91/91, `Tests Leaked: 0` nas quatro. Nenhum ajuste foi preciso depois da rodada Delphi.
+
+---
+
 ## Compatibilidade e nomenclatura
 
 A lib fala RESP, não depende da implementação: funciona com **Redis**, **Valkey**, **KeyDB**

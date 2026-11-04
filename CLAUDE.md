@@ -116,13 +116,14 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
 Até a 0.3.x, `Redis.Transport`, `Redis.Transport.Tls` e `Redis.Transport.OpenSSL` eram
 cópias renomeadas das units da lib AMQP, com bloco de PROVENIENCIA e a regra de portar
 correção à mão. **Desde a 0.4.0 não são mais**: o transporte vem da pascal-common-faa (seção
-53 de `docs/DECISOES.md`), e a regra deixou de valer para elas.
+53 de `docs/DECISOES.md`), e a regra deixou de valer para elas. A `Redis.Transport.Tls` e a
+`Redis.Transport.OpenSSL` ficaram vazias na 0.4.0 e **saíram na 0.6.0**.
 
 | Unit | Hoje |
 |---|---|
 | `Redis.Transport` | `ERedisTransport`/`ERedisTransportTimeout` (declaradas, não mais levantadas), `ERedisTls`, `RedisDefaultTlsBackend`, `RedisTcpOptions`, `RedisTlsOptions`, `RedisTlsBackendName/Info` |
-| `Redis.Transport.Tls` | vazia, **obsoleta**: só puxa `PascalCommon.Transport.SChannel`; sai na próxima minor |
-| `Redis.Transport.OpenSSL` | vazia, **obsoleta**: só puxa `PascalCommon.Transport.OpenSSL`; sai na próxima minor |
+| `Redis.Transport.Tls` | removida na 0.6.0 (era vazia desde a 0.4.0) |
+| `Redis.Transport.OpenSSL` | removida na 0.6.0 (era vazia desde a 0.4.0) |
 
 O que valia aqui e continua valendo como lição: **timeout tem exceção própria e não é
 rebaixado a fim de stream** ("eu desisti" não é "o servidor encerrou" — a resposta pode estar
@@ -204,8 +205,6 @@ Existentes (M0 a M8):
 ```
 src/redis.inc
 src/Redis.Transport.pas          excecoes de transporte, TRedisParams -> opcoes da common, nome do backend (0.4.0)
-src/Redis.Transport.Tls.pas      vazia, obsoleta (0.4.0)
-src/Redis.Transport.OpenSSL.pas  vazia, obsoleta (0.4.0)
 src/Redis.Types.pas              TRedisReplyKind, IRedisReply, TRedisArg, excecoes, params, Utf8Encode/Decode
 src/Redis.Resp.pas               codec RESP2/RESP3: RedisEncodeCommand, TRedisReader, IRedisByteSource
 src/Redis.Connection.pas         TRedisConnection (1 socket, handshake, Execute/ExecuteRaw, Send/Receive full-duplex), TRedisPipeline, TRedisSocketStream
@@ -225,7 +224,7 @@ src/Redis.PubSub.pas             TRedisSubscriber: conexão dedicada + thread de
 src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico + CreateSubscriber
 src/Redis.Tracing.pas            spans do OpenTelemetry (PascalCommon.Tracing): nome, texto sanitizado, atributos
 src/Redis.Lock.pas               TRedisLock (0.3.0): SET NX PX + token, release/extend por script, indisponivel != ocupado
-src/Redis.Cache.pas              TRedisCacheStore (0.5.0): IPcCacheStore do PascalCommon.Cache; MGET + SET NX, Bump em Lua
+src/Redis.Cache.pas              TRedisCacheStore (0.5.0): IPcCacheStore do PascalCommon.Cache; MGET + SET NX PX (contadores com TTL, CounterTtlMs, desde a 0.6.0), Bump em Lua
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao

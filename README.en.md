@@ -449,7 +449,7 @@ the `Redis.Cache` unit provides the Redis store, shared by every instance of the
 uses
   PascalCommon.Cache, Redis.Pool, Redis.Cache;
 
-LStore := TRedisCacheStore.Create(LPool);     // the pool is not the store's
+LStore := TRedisCacheStore.Create(LPool);     // the pool is not the store's; tag counters live 1 day
 FCache := TPcCache.Create(LStore, 'app');
 
 LKey := FCache.Key('products:' + IntToStr(LCategory), ['category:' + IntToStr(LCategory)]);
@@ -463,10 +463,17 @@ FCache.Invalidate(['category:7']);            // after the commit
 ```
 
 - Values are `string`s, written and read as UTF-8, byte for byte. `Put` is `PSETEX`.
-- Each tag is a counter with no TTL. A missing counter starts at the Unix time in ms, never at
-  0, so a counter Redis lost (eviction, restart without persistence) comes back larger than it
-  ever was and old entries are not read again. `Invalidate` only increments a counter that
+- Each tag is a counter. A missing counter starts at the Unix time in ms, never at 0, so a
+  counter that went away (expired, evicted, restart without persistence) comes back larger than
+  it ever was and old entries are not read again. `Invalidate` only increments a counter that
   exists (Lua script).
+- **The counters expire** (since 0.6.0; up to 0.5.0 they stayed for good): they are created with
+  `SET NX PX`, with the TTL in the constructor's second parameter, `CounterTtlMs` (default: one
+  day, `REDIS_CACHE_COUNTER_TTL_MS`). A read doesn't renew it, and `Invalidate` keeps it. So a tag
+  that comes from client input (any id) doesn't leave a key in Redis for good. The price is one
+  miss per key when its counter expires, which is why `CounterTtlMs` should be longer than the
+  values' TTLs. The guarantee holds while the instances' clocks differ by much less than
+  `CounterTtlMs`.
 - **Redis down is a miss, not an error**: connection, timeout, exhausted or closed pool and TLS
   become `EPcCacheUnavailable`, and `TPcCache` carries on without the cache (telling
   `OnError`). A reply error (`WRONGTYPE`) is a bug and propagates.
@@ -775,8 +782,10 @@ own bookkeeping. Streams add the whole life cycle of a work queue: two consumers
 same group splitting the entries, the pending entry that survives the dead worker and
 comes back through `XAUTOCLAIM`, the `XCLAIM` that does **not** steal work in progress,
 and an `XREAD BLOCK` whose deadline is longer than the socket read timeout. The cache store
-adds a tag counter deleted as eviction would delete it, which comes back larger than it ever
-was without the old entry being read, and eight threads racing to create the same counters.
+adds a tag counter deleted as eviction would delete it, and another that expires on its own,
+which come back larger than they ever were without the old entry being read, with the counter's
+TTL checked on the server (created with it, kept by `Invalidate`, not renewed by a read), and
+eight threads racing to create the same counters.
 
 **TLS is deliberately left out of this suite:** it has to pass with only
 `docker-compose.yml` up, with no certificates at all. TLS is exercised by the smoke test,

@@ -443,7 +443,7 @@ a unit `Redis.Cache` traz o store Redis, compartilhado por todas as instâncias 
 uses
   PascalCommon.Cache, Redis.Pool, Redis.Cache;
 
-LStore := TRedisCacheStore.Create(LPool);     // o pool não é do store
+LStore := TRedisCacheStore.Create(LPool);     // o pool não é do store; contadores de tag com TTL de 1 dia
 FCache := TPcCache.Create(LStore, 'app');
 
 LChave := FCache.Key('produtos:' + IntToStr(LCategoria), ['categoria:' + IntToStr(LCategoria)]);
@@ -457,10 +457,17 @@ FCache.Invalidate(['categoria:7']);           // depois do commit
 ```
 
 - Valores são `string`, gravados e lidos como UTF-8, byte a byte. `Put` é `PSETEX`.
-- Cada tag é um contador sem TTL. Um contador ausente nasce no horário Unix em ms, nunca em 0,
-  então um contador que o Redis perdeu (eviction, restart sem persistência) volta maior do que
-  já foi e as entradas antigas não são lidas de novo. `Invalidate` só incrementa contador que
-  existe (script Lua).
+- Cada tag é um contador. Um contador ausente nasce no horário Unix em ms, nunca em 0, então um
+  contador que sumiu (expirou, eviction, restart sem persistência) volta maior do que já foi e
+  as entradas antigas não são lidas de novo. `Invalidate` só incrementa contador que existe
+  (script Lua).
+- **Os contadores expiram** (desde a 0.6.0; até a 0.5.0 ficavam para sempre): nascem com
+  `SET NX PX`, com o TTL do segundo parâmetro do construtor, `CounterTtlMs` (padrão: um dia,
+  `REDIS_CACHE_COUNTER_TTL_MS`). Ler não renova o prazo, e `Invalidate` o mantém. Assim uma tag
+  que vem de entrada do cliente (um id qualquer) não deixa uma chave no Redis para sempre. O
+  preço é um miss por chave quando o contador dela expira; por isso o `CounterTtlMs` deve ser
+  maior que o TTL dos valores. A garantia vale enquanto os relógios das instâncias diferirem bem
+  menos que o `CounterTtlMs`.
 - **Redis fora é miss, não erro**: conexão, timeout, pool esgotado ou fechado e TLS viram
   `EPcCacheUnavailable`, e o `TPcCache` segue sem o cache (avisando o `OnError`). Erro de
   resposta (`WRONGTYPE`) é bug e sobe.
@@ -764,9 +771,10 @@ difusão para vários assinantes e com a reconexão: a conexão do assinante é 
 uma fila de trabalho: dois consumidores do mesmo grupo repartindo as entradas, a pendência
 que sobrevive ao worker que morreu e volta por `XAUTOCLAIM`, o `XCLAIM` que **não** rouba
 trabalho em andamento e o `XREAD BLOCK` com prazo maior que o read timeout do socket. O store
-do cache entra com um contador de tag apagado como um eviction o apagaria, que volta maior do
-que já foi sem que a entrada antiga seja lida, e oito threads correndo para criar os mesmos
-contadores.
+do cache entra com um contador de tag apagado como um eviction o apagaria, e outro que expira
+sozinho, que voltam maiores do que já foram sem que a entrada antiga seja lida, com o TTL do
+contador conferido no servidor (nasce com ele, `Invalidate` o mantém, a leitura não o renova),
+e oito threads correndo para criar os mesmos contadores.
 
 **TLS fica de fora daqui de propósito:** esta suíte tem de valer com só o
 `docker-compose.yml` de pé, sem certificado nenhum. Quem exercita TLS é o smoke
