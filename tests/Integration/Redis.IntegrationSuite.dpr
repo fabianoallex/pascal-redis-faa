@@ -42,6 +42,7 @@ uses
   Redis.Client in '..\..\src\Redis.Client.pas',
   Redis.Tracing in '..\..\src\Redis.Tracing.pas',
   Redis.Lock in '..\..\src\Redis.Lock.pas',
+  Redis.Cache in '..\..\src\Redis.Cache.pas',
   Redis.DUnitXCompat in '..\Unit\Redis.DUnitXCompat.pas',
   Redis.IntegrationTests in 'Redis.IntegrationTests.pas';
 

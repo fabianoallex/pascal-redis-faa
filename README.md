@@ -433,6 +433,40 @@ end;
   prazo, outro pode adquirir. Onde isso importa, o lock só poupa trabalho e a palavra final é
   de outra coisa (a pascal-agenda-faa, de onde ele veio, deixa o banco decidir o horário).
 
+### Cache (`TRedisCacheStore`)
+
+A pascal-common-faa (1.29.0) tem um cache com prazo e invalidação por tag
+(`PascalCommon.Cache`): o `TPcCache` guarda as regras e um store guarda os dados. Desde a 0.5.0,
+a unit `Redis.Cache` traz o store Redis, compartilhado por todas as instâncias da aplicação:
+
+```pascal
+uses
+  PascalCommon.Cache, Redis.Pool, Redis.Cache;
+
+LStore := TRedisCacheStore.Create(LPool);     // o pool não é do store
+FCache := TPcCache.Create(LStore, 'app');
+
+LChave := FCache.Key('produtos:' + IntToStr(LCategoria), ['categoria:' + IntToStr(LCategoria)]);
+if not FCache.TryGet(LChave, LJson) then
+begin
+  LJson := CarregaDoBanco(LCategoria);
+  FCache.Put(LChave, LJson, 300);             // segundos
+end;
+...
+FCache.Invalidate(['categoria:7']);           // depois do commit
+```
+
+- Valores são `string`, gravados e lidos como UTF-8, byte a byte. `Put` é `PSETEX`.
+- Cada tag é um contador sem TTL. Um contador ausente nasce no horário Unix em ms, nunca em 0,
+  então um contador que o Redis perdeu (eviction, restart sem persistência) volta maior do que
+  já foi e as entradas antigas não são lidas de novo. `Invalidate` só incrementa contador que
+  existe (script Lua).
+- **Redis fora é miss, não erro**: conexão, timeout, pool esgotado ou fechado e TLS viram
+  `EPcCacheUnavailable`, e o `TPcCache` segue sem o cache (avisando o `OnError`). Erro de
+  resposta (`WRONGTYPE`) é bug e sobe.
+- A unit exige a pascal-common-faa **1.29.0**. As regras de uso (invalidar depois do commit,
+  não guardar o que uma transação que escreveu leu) estão no `docs/cache-design.md` de lá.
+
 ### Pub/Sub
 
 Publicar é um comando comum — sai por qualquer conexão do pool:
@@ -657,7 +691,7 @@ LCliente.Strings.SetValue('sessao:42', LToken);   // span client 'SET'
 [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.27.0 ou mais
 nova** — a base compartilhada pelas libs `*-faa`, de onde vêm o monitor/condvar, os
 atomics portáveis, o relógio monotônico, o pool de threads (`TPcMonitor`, `PcAtomic*`,
-`PcTickMs`, `PcPool`) os spans (`PascalCommon.Tracing`) os bytes aleatórios do token do lock (`PascalCommon.Random`, desde a 0.3.1) e o TCP e o TLS (`PascalCommon.Transport*`, desde a 0.4.0). Quem fornece a cópia é **a sua aplicação**, uma só para todas as
+`PcTickMs`, `PcPool`) os spans (`PascalCommon.Tracing`) os bytes aleatórios do token do lock (`PascalCommon.Random`, desde a 0.3.1) e o TCP e o TLS (`PascalCommon.Transport*`, desde a 0.4.0). A unit `Redis.Cache` (0.5.0) pede a **1.29.0**, por causa do `PascalCommon.Cache`, e o `pascal_redis_faa.lpk`, que compila todas as units, também. Quem fornece a cópia é **a sua aplicação**, uma só para todas as
 libs `*-faa` que ela usar: no Lazarus, registre o `pascal_common_faa.lpk` (o
 `pascal_redis_faa.lpk` o exige pelo nome); no Delphi, ponha o `src` dela no search path.
 Uma cópia velha demais para o build com uma mensagem dizendo isso. O submódulo
@@ -729,7 +763,10 @@ difusão para vários assinantes e com a reconexão: a conexão do assinante é 
 `PUBSUB NUMSUB`, não a contabilidade do cliente. Os streams entram com o ciclo inteiro de
 uma fila de trabalho: dois consumidores do mesmo grupo repartindo as entradas, a pendência
 que sobrevive ao worker que morreu e volta por `XAUTOCLAIM`, o `XCLAIM` que **não** rouba
-trabalho em andamento e o `XREAD BLOCK` com prazo maior que o read timeout do socket.
+trabalho em andamento e o `XREAD BLOCK` com prazo maior que o read timeout do socket. O store
+do cache entra com um contador de tag apagado como um eviction o apagaria, que volta maior do
+que já foi sem que a entrada antiga seja lida, e oito threads correndo para criar os mesmos
+contadores.
 
 **TLS fica de fora daqui de propósito:** esta suíte tem de valer com só o
 `docker-compose.yml` de pé, sem certificado nenhum. Quem exercita TLS é o smoke

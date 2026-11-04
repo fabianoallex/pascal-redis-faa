@@ -439,6 +439,40 @@ end;
   final word is something else's (pascal-agenda-faa, where it came from, lets the database
   decide the slot).
 
+### Cache (`TRedisCacheStore`)
+
+pascal-common-faa (1.29.0) has a cache with expiry and tag invalidation
+(`PascalCommon.Cache`): `TPcCache` holds the rules and a store holds the data. Since 0.5.0,
+the `Redis.Cache` unit provides the Redis store, shared by every instance of the application:
+
+```pascal
+uses
+  PascalCommon.Cache, Redis.Pool, Redis.Cache;
+
+LStore := TRedisCacheStore.Create(LPool);     // the pool is not the store's
+FCache := TPcCache.Create(LStore, 'app');
+
+LKey := FCache.Key('products:' + IntToStr(LCategory), ['category:' + IntToStr(LCategory)]);
+if not FCache.TryGet(LKey, LJson) then
+begin
+  LJson := LoadFromDatabase(LCategory);
+  FCache.Put(LKey, LJson, 300);               // seconds
+end;
+...
+FCache.Invalidate(['category:7']);            // after the commit
+```
+
+- Values are `string`s, written and read as UTF-8, byte for byte. `Put` is `PSETEX`.
+- Each tag is a counter with no TTL. A missing counter starts at the Unix time in ms, never at
+  0, so a counter Redis lost (eviction, restart without persistence) comes back larger than it
+  ever was and old entries are not read again. `Invalidate` only increments a counter that
+  exists (Lua script).
+- **Redis down is a miss, not an error**: connection, timeout, exhausted or closed pool and TLS
+  become `EPcCacheUnavailable`, and `TPcCache` carries on without the cache (telling
+  `OnError`). A reply error (`WRONGTYPE`) is a bug and propagates.
+- The unit needs pascal-common-faa **1.29.0**. The usage rules (invalidate after the commit,
+  don't store what a transaction that also wrote has read) are in its `docs/cache-design.md`.
+
 ### Pub/Sub
 
 Publishing is an ordinary command — it goes out through any pooled connection:
@@ -668,7 +702,7 @@ LClient.Strings.SetValue('session:42', LToken);   // client span 'SET'
 [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) **1.27.0 or later**
 — the base shared by the `*-faa` libraries, which provides the monitor/condvar, the
 portable atomics, the monotonic clock, the thread pool (`TPcMonitor`, `PcAtomic*`,
-`PcTickMs`, `PcPool`) the spans (`PascalCommon.Tracing`) the lock token's random bytes (`PascalCommon.Random`, since 0.3.1) and TCP and TLS (`PascalCommon.Transport*`, since 0.4.0). **Your application** provides the copy, a single one for every
+`PcTickMs`, `PcPool`) the spans (`PascalCommon.Tracing`) the lock token's random bytes (`PascalCommon.Random`, since 0.3.1) and TCP and TLS (`PascalCommon.Transport*`, since 0.4.0). The `Redis.Cache` unit (0.5.0) needs **1.29.0**, for `PascalCommon.Cache`, and so does `pascal_redis_faa.lpk`, which compiles every unit. **Your application** provides the copy, a single one for every
 `*-faa` library it uses: on Lazarus, register `pascal_common_faa.lpk` (`pascal_redis_faa.lpk`
 requires it by name); on Delphi, put its `src` on the search path. A copy that is too old
 stops the build with a message saying so. This repository's
@@ -740,7 +774,9 @@ the subscriptions came back is the **server**, through `PUBSUB NUMSUB`, not the 
 own bookkeeping. Streams add the whole life cycle of a work queue: two consumers of the
 same group splitting the entries, the pending entry that survives the dead worker and
 comes back through `XAUTOCLAIM`, the `XCLAIM` that does **not** steal work in progress,
-and an `XREAD BLOCK` whose deadline is longer than the socket read timeout.
+and an `XREAD BLOCK` whose deadline is longer than the socket read timeout. The cache store
+adds a tag counter deleted as eviction would delete it, which comes back larger than it ever
+was without the old entry being read, and eight threads racing to create the same counters.
 
 **TLS is deliberately left out of this suite:** it has to pass with only
 `docker-compose.yml` up, with no certificates at all. TLS is exercised by the smoke test,

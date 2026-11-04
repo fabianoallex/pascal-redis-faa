@@ -6,6 +6,29 @@ uma versão minor pode mudar a API; toda mudança desse tipo aparece aqui.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
+O store Redis do cache da pascal-common-faa 1.29.0 (`PascalCommon.Cache`, fase F2 do
+`docs/cache-design.md` de lá). Racional e medições na seção 54 de `docs/DECISOES.md`.
+
+### Adicionado
+
+- **`Redis.Cache`: `TRedisCacheStore`**, o `IPcCacheStore` sobre o Redis, para usar com o
+  `TPcCache` da common: `TRedisCacheStore.Create(RedisPool)` (ou com um `TRedisClient`; nenhum
+  dos dois é do store). `Put` por `PSETEX` (TTL em ms; `TtlMs <= 0` apaga), contadores de tag
+  lidos num `MGET`, criados com `SET NX` no horário Unix em ms (nunca em 0) e sem TTL, e `Bump`
+  por script Lua que só incrementa o contador que existe. Falha de disponibilidade (conexão,
+  timeout, pool esgotado ou fechado, transporte, TLS) vira `EPcCacheUnavailable`, que o
+  `TPcCache` trata como miss; erro de resposta e de tipo sobe. Também `RedisUnixTimeMs` e
+  `RedisCacheIsUnavailable`.
+
+### Alterado
+
+- **A unit `Redis.Cache` exige a pascal-common-faa 1.29.0**, e o `pascal_redis_faa.lpk`, que
+  compila todas as units, passa a exigir `MinVersion` 1.29. No Delphi, quem não usa a
+  `Redis.Cache` continua precisando só da 1.27.0. O submódulo `external/pascal-common-faa`
+  aponta para a tag `v1.29.0`.
+
 ## [0.4.0] - 2026-11-01
 
 O TCP e o TLS passam a vir da pascal-common-faa (`PascalCommon.Transport*`, passo 3 do
@@ -206,7 +229,8 @@ traz os três primeiros samples GUI do M9.
 - `LockDistribuidoVcl`: os timers do concorrente e da renovação enfileiravam trabalho mesmo
   com a janela fechando.
 
-[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fabianoallex/pascal-redis-faa/compare/v0.2.0...v0.3.0

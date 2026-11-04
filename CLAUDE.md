@@ -73,18 +73,21 @@ cópia renomeada da `AMQP.Threading`; ela foi apagada, sem alias.
   sempre palavra inteira (`\b`) e `perl -pi`, nunca `sed -i` (troca CRLF por LF no Git
   for Windows — gotcha 3 da pascal-common-faa).
 - **A lib nunca embute a pascal-common-faa.** O `pascal_redis_faa.lpk` exige
-  `pascal_common_faa` **só pelo nome**, com `MinVersion` 1.27 (o transporte TCP/TLS; antes 1.15, desde a 0.3.1, pelo token do
-  `TRedisLock`): a aplicação fornece a cópia
+  `pascal_common_faa` **só pelo nome**, com `MinVersion` 1.29 (o `PascalCommon.Cache` da `Redis.Cache`, desde a 0.5.0; antes 1.27
+  pelo transporte TCP/TLS e 1.15, desde a 0.3.1, pelo token do `TRedisLock`): a aplicação fornece a cópia
   única. O submódulo `external/pascal-common-faa` (checkout **sem** `--recursive`) existe
-  para testes, samples e scripts. Ele aponta para a tag `v1.27.0`, a que lançou
-  as units `PascalCommon.Transport*` (decisão T8 do `docs/transport-design.md` de lá); o mínimo
-  1.27.0 está na `Redis.Types` e no `MinVersion`. Os `.lpi` deles listam
+  para testes, samples e scripts. Ele aponta para a tag `v1.29.0`, a que lançou
+  o `PascalCommon.Cache` (fase F1 do `docs/cache-design.md` de lá). O mínimo 1.27.0 continua
+  na `Redis.Types` (o resto da lib não precisa de mais); a `Redis.Cache` tem o próprio, 1.29.0,
+  e o `MinVersion` do `.lpk` é 1.29 porque o pacote compila todas as units. Os `.lpi` deles listam
   `pascal_common_faa` **primeiro**, com `DefaultFilename` em `external/` e `Prefer="True"`
   (sem o `Prefer`, um pacote registrado no IDE ganharia); os `.dproj` têm
   `..\..\external\pascal-common-faa\src` no search path.
 - **Checagem de versão mínima** na `Redis.Types`, logo depois do `uses` que traz
   `PascalCommon.Version` (a condicional só enxerga constantes de units já usadas). Ao
-  passar a usar algo novo da pascal-common-faa, suba o mínimo ali **e** no `MinVersion`.
+  passar a usar algo novo da pascal-common-faa, suba o mínimo ali **e** no `MinVersion`. Exceção
+  de propósito: o que só uma unit opcional usa leva o `$IF` naquela unit (a `Redis.Cache`
+  pede 1.29.0), para quem não a usa no Delphi não precisar subir a common.
 - **`PcPool` é um pool só para o processo inteiro**, dividido com qualquer outra lib.
   É finalizado DEPOIS das units da lib — e, num app GUI, depois de a form já ter sido
   liberada (LCL e VCL liberam as forms num exit proc, antes de qualquer finalização de
@@ -222,6 +225,7 @@ src/Redis.PubSub.pas             TRedisSubscriber: conexão dedicada + thread de
 src/Redis.Client.pas             TRedisClient: pool + famílias + Execute genérico + CreateSubscriber
 src/Redis.Tracing.pas            spans do OpenTelemetry (PascalCommon.Tracing): nome, texto sanitizado, atributos
 src/Redis.Lock.pas               TRedisLock (0.3.0): SET NX PX + token, release/extend por script, indisponivel != ocupado
+src/Redis.Cache.pas              TRedisCacheStore (0.5.0): IPcCacheStore do PascalCommon.Cache; MGET + SET NX, Bump em Lua
 ```
 
 Planejadas (ao criar cada uma, adicionar ao `packages/pascal_redis_faa.lpk` **e** ao

@@ -59,6 +59,8 @@ uses
   Redis.Commands.Scripting,
   Redis.Commands.PubSub,
   Redis.Lock,
+  PascalCommon.Cache,
+  Redis.Cache,
   Redis.Transaction,
   Redis.PubSub;
 
@@ -274,6 +276,22 @@ type
     [Test] procedure Lock_PrazoVence_OutroAdquire;
     [Test] procedure Lock_Extend_SoODonoEstende;
     [Test] procedure Lock_RedisFora_IndisponivelNaoOcupado;
+  end;
+
+  [TestFixture]
+  TRedisCacheIntegrationTests = class
+  public
+    [Test] procedure Cache_PutGetDelete;
+    [Test] procedure Cache_PrazoVence;
+    [Test] procedure Cache_TtlZeroOuNegativo_ApagaENaoGrava;
+    [Test] procedure Cache_Generations_NasceDoRelogioSemTtl;
+    [Test] procedure Cache_Bump_AvancaEAusenteFicaAusente;
+    [Test] procedure Cache_ContadorApagado_VoltaMaior_EntradaAntigaNaoELida;
+    [Test] procedure Cache_TextoNaoAscii_IdaEVoltaByteAByte;
+    [Test] procedure Cache_ErroDeTipoOuDeResposta_Sobe;
+    [Test] procedure Cache_RedisFora_ViraMissEOnError;
+    [Test] procedure Cache_PoolEsgotadoOuFechado_ViraIndisponivel;
+    [Test] procedure Cache_Concorrente_CriacaoUnicaEBumpsContados;
   end;
 
   [TestFixture]
@@ -3233,6 +3251,546 @@ begin
   end;
 end;
 
+{ --- Redis.Cache: o IPcCacheStore da pascal-common-faa sobre o Redis --- }
+
+const
+  // Nome do TPcCache dos testes: so' [A-Za-z0-9_.-], entao nao cabe o
+  // PREFIXO (que tem ':'). As chaves ficam '<nome>:v:...' e '<nome>:tag:...'.
+  NOME_CACHE_IT = 'pascal-redis-faa.it';
+
+type
+  { Conta os avisos do OnError do TPcCache e serve de loader do GetOrLoad. }
+  TRedisCacheAvisosIt = class
+  public
+    Total: Integer;
+    Classe: string;
+    Cargas: Integer;
+    procedure Aviso(const ACacheName: string; AError: Exception);
+    function Carrega(const AArg: string): string;
+  end;
+
+  { Uma das threads do teste concorrente: le os contadores novos (todas
+    correndo para cria-los ao mesmo tempo) e depois alterna Bump e leitura do
+    contador compartilhado, conferindo que ele so' anda para a frente. }
+  TRedisCacheCorridaIt = class(TThread)
+  private
+    FStore: IPcCacheStore;
+    FTags: array of string;
+    FCompartilhado: string;
+    FRodadas: Integer;
+    FLargada: TEvent;
+  protected
+    procedure Execute; override;
+  public
+    Valores: array of Int64;
+    Erro: string;
+    constructor Create(const AStore: IPcCacheStore; const ATags: array of string;
+      const ACompartilhado: string; ARodadas: Integer; ALargada: TEvent);
+  end;
+
+procedure TRedisCacheAvisosIt.Aviso(const ACacheName: string; AError: Exception);
+begin
+  Inc(Total);
+  Classe := AError.ClassName;
+end;
+
+function TRedisCacheAvisosIt.Carrega(const AArg: string): string;
+begin
+  Inc(Cargas);
+  Result := 'carregado:' + AArg;
+end;
+
+constructor TRedisCacheCorridaIt.Create(const AStore: IPcCacheStore;
+  const ATags: array of string; const ACompartilhado: string; ARodadas: Integer;
+  ALargada: TEvent);
+var
+  I: Integer;
+begin
+  FStore := AStore;
+  SetLength(FTags, Length(ATags));
+  for I := 0 to High(ATags) do
+    FTags[I] := ATags[I];
+  FCompartilhado := ACompartilhado;
+  FRodadas := ARodadas;
+  FLargada := ALargada;
+  SetLength(Valores, Length(ATags));
+  inherited Create(False);
+end;
+
+procedure TRedisCacheCorridaIt.Execute;
+var
+  I: Integer;
+  LAnterior, LAtual: Int64;
+begin
+  try
+    if FLargada.WaitFor(10000) <> wrSignaled then
+    begin
+      Erro := 'a largada nao veio';
+      Exit;
+    end;
+    for I := 0 to High(FTags) do
+      Valores[I] := FStore.Generations([FTags[I]])[0];
+    LAnterior := FStore.Generations([FCompartilhado])[0];
+    for I := 1 to FRodadas do
+    begin
+      FStore.Bump([FCompartilhado]);
+      LAtual := FStore.Generations([FCompartilhado])[0];
+      // O proprio Bump veio depois da leitura anterior: tem de ter andado.
+      if LAtual <= LAnterior then
+      begin
+        Erro := Format('o contador voltou ou parou: %d depois de %d', [LAtual, LAnterior]);
+        Exit;
+      end;
+      LAnterior := LAtual;
+    end;
+  except
+    on E: Exception do
+      Erro := E.ClassName + ': ' + E.Message;
+  end;
+end;
+
+// Classe da excecao que uma operacao do store levanta ('' se nao levantou).
+// AOperacao: 0 TryGet, 1 Put, 2 Delete, 3 Generations, 4 Bump.
+function FalhaDoStore(const AStore: IPcCacheStore; AOperacao: Integer;
+  const AKey: string): string;
+var
+  LValor: string;
+begin
+  Result := '';
+  try
+    case AOperacao of
+      0: AStore.TryGet(AKey, LValor);
+      1: AStore.Put(AKey, 'v', 1000);
+      2: AStore.Delete(AKey);
+      3: AStore.Generations([AKey]);
+      4: AStore.Bump([AKey]);
+    end;
+  except
+    on E: Exception do
+      Result := E.ClassName;
+  end;
+end;
+
+// Espera o relogio de RedisUnixTimeMs passar de AValor, com prazo: e' a
+// condicao do C4 para um contador renascido ser maior que o antigo.
+procedure EsperaRelogioPassar(AValor: Int64);
+var
+  LPrazo: UInt64;
+begin
+  LPrazo := PcTickMs + 5000;
+  while (RedisUnixTimeMs <= AValor) and (PcTickMs < LPrazo) do
+    Sleep(1);
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_PutGetDelete;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LValor: string;
+  LPttl: Int64;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    LStore := TRedisCacheStore.Create(LPool);
+    LStore.Put(Chave('cache:a'), 'valor', 10000);
+    TAssert.AssertTrue(LStore.TryGet(Chave('cache:a'), LValor));
+    TAssert.AssertEquals('valor', LValor);
+    // PSETEX: o prazo chega ao servidor em milissegundos.
+    LPttl := LConn.Execute('PTTL', [Chave('cache:a')]).AsInteger;
+    TAssert.AssertTrue('PTTL ' + IntToStr(LPttl), (LPttl > 0) and (LPttl <= 10000));
+
+    LStore.Put(Chave('cache:a'), 'outro', 10000);
+    TAssert.AssertTrue(LStore.TryGet(Chave('cache:a'), LValor));
+    TAssert.AssertEquals('outro', LValor);
+
+    LStore.Delete(Chave('cache:a'));
+    TAssert.AssertFalse(LStore.TryGet(Chave('cache:a'), LValor));
+    TAssert.AssertEquals('', LValor);
+    LStore.Delete(Chave('cache:a'));  // ausente: nao levanta
+    // '' guardado e' acerto, nao ausencia.
+    LStore.Put(Chave('cache:a'), '', 10000);
+    TAssert.AssertTrue(LStore.TryGet(Chave('cache:a'), LValor));
+    TAssert.AssertEquals('', LValor);
+  finally
+    Limpa(LConn, ['cache:a']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_PrazoVence;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LValor: string;
+  LPrazo: UInt64;
+  LVivo: Boolean;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    LStore := TRedisCacheStore.Create(LPool);
+    LStore.Put(Chave('cache:prazo'), 'v', 300);
+    TAssert.AssertTrue(LStore.TryGet(Chave('cache:prazo'), LValor));
+    LPrazo := PcTickMs + 5000;
+    repeat
+      LVivo := LStore.TryGet(Chave('cache:prazo'), LValor);
+      if LVivo then
+        Sleep(20);
+    until (not LVivo) or (PcTickMs >= LPrazo);
+    TAssert.AssertFalse('o prazo de 300 ms nao venceu em 5 s', LVivo);
+    TAssert.AssertEquals(Int64(0), LConn.Execute('EXISTS', [Chave('cache:prazo')]).AsInteger);
+  finally
+    Limpa(LConn, ['cache:prazo']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_TtlZeroOuNegativo_ApagaENaoGrava;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LValor: string;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    LStore := TRedisCacheStore.Create(LPool);
+    LStore.Put(Chave('cache:ttl0'), 'v', 10000);
+    LStore.Put(Chave('cache:ttl0'), 'x', 0);
+    TAssert.AssertFalse('TTL 0 apaga a que existia', LStore.TryGet(Chave('cache:ttl0'), LValor));
+    LStore.Put(Chave('cache:ttl0'), 'y', -1);
+    TAssert.AssertEquals('TTL negativo nao grava', Int64(0),
+      LConn.Execute('EXISTS', [Chave('cache:ttl0')]).AsInteger);
+  finally
+    Limpa(LConn, ['cache:ttl0']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_Generations_NasceDoRelogioSemTtl;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LAntes, LDepois: Int64;
+  LGeracoes, LDeNovo: TArray<Int64>;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    Limpa(LConn, ['cache:tag:a', 'cache:tag:b']);
+    LStore := TRedisCacheStore.Create(LPool);
+    TAssert.AssertEquals('sem tags, nenhum valor', 0, Length(LStore.Generations([])));
+
+    LAntes := RedisUnixTimeMs;
+    LGeracoes := LStore.Generations([Chave('cache:tag:a'), Chave('cache:tag:b')]);
+    LDepois := RedisUnixTimeMs;
+    TAssert.AssertEquals(2, Length(LGeracoes));
+    // Nunca em 0: nasce no horario Unix em ms (C4).
+    TAssert.AssertTrue('a nasceu do relogio', (LGeracoes[0] >= LAntes) and (LGeracoes[0] <= LDepois));
+    TAssert.AssertTrue('b nasceu do relogio', (LGeracoes[1] >= LAntes) and (LGeracoes[1] <= LDepois));
+    TAssert.AssertEquals('contador sem TTL', Int64(-1),
+      LConn.Execute('TTL', [Chave('cache:tag:a')]).AsInteger);
+
+    // Relido, nao recriado; e a ordem segue a de ATags.
+    LDeNovo := LStore.Generations([Chave('cache:tag:b'), Chave('cache:tag:a')]);
+    TAssert.AssertEquals(LGeracoes[1], LDeNovo[0]);
+    TAssert.AssertEquals(LGeracoes[0], LDeNovo[1]);
+  finally
+    Limpa(LConn, ['cache:tag:a', 'cache:tag:b']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_Bump_AvancaEAusenteFicaAusente;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LGeracao: Int64;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    Limpa(LConn, ['cache:tag:x', 'cache:tag:ausente']);
+    LStore := TRedisCacheStore.Create(LPool);
+    LGeracao := LStore.Generations([Chave('cache:tag:x')])[0];
+    LStore.Bump([Chave('cache:tag:x'), Chave('cache:tag:ausente')]);
+    TAssert.AssertEquals(LGeracao + 1, LStore.Generations([Chave('cache:tag:x')])[0]);
+    // O INCR puro criaria em 1; o ausente tem de continuar ausente.
+    TAssert.AssertEquals('Bump nao cria contador', Int64(0),
+      LConn.Execute('EXISTS', [Chave('cache:tag:ausente')]).AsInteger);
+    LStore.Bump([]);  // nada a fazer, nao vai ao servidor
+  finally
+    Limpa(LConn, ['cache:tag:x', 'cache:tag:ausente']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_ContadorApagado_VoltaMaior_EntradaAntigaNaoELida;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LCache: IPcCache;
+  LConn: TRedisConnection;
+  LTag, LChave1, LChave2, LChave3, LValor: string;
+  LMaior, LRenascido: Int64;
+begin
+  LTag := NOME_CACHE_IT + ':tag:categoria';
+  LChave1 := '';
+  LChave2 := '';
+  LChave3 := '';
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    LConn.Execute('DEL', [LTag]);
+    LStore := TRedisCacheStore.Create(LPool);
+    LCache := TPcCache.Create(LStore, NOME_CACHE_IT);
+
+    LChave1 := LCache.Key('produto', ['categoria']);
+    LCache.Put(LChave1, 'velho', 60);
+    LCache.Invalidate(['categoria']);
+    LCache.Invalidate(['categoria']);
+    LChave2 := LCache.Key('produto', ['categoria']);
+    TAssert.AssertTrue(LChave2 <> LChave1);
+    LCache.Put(LChave2, 'velho2', 60);
+    TAssert.AssertTrue(LCache.TryGet(LChave2, LValor));
+    LMaior := LStore.Generations([LTag])[0];
+
+    // Eviction do contador (ou restart sem persistencia).
+    LConn.Execute('DEL', [LTag]);
+    EsperaRelogioPassar(LMaior);
+
+    LChave3 := LCache.Key('produto', ['categoria']);
+    LRenascido := LStore.Generations([LTag])[0];
+    TAssert.AssertTrue(Format('renasceu em %d, ja'' tinha sido %d', [LRenascido, LMaior]),
+      LRenascido > LMaior);
+    TAssert.AssertTrue(LChave3 <> LChave1);
+    TAssert.AssertTrue(LChave3 <> LChave2);
+    TAssert.AssertFalse('a entrada antiga nao volta', LCache.TryGet(LChave3, LValor));
+    // Ela continua no Redis: quem a esconde e' a geracao, nao um DEL.
+    TAssert.AssertTrue(LStore.TryGet(LChave2, LValor));
+    TAssert.AssertEquals('velho2', LValor);
+  finally
+    LConn.Execute('DEL', [LTag]);
+    if LChave1 <> '' then
+      LConn.Execute('DEL', [LChave1]);
+    if LChave2 <> '' then
+      LConn.Execute('DEL', [LChave2]);
+    if LChave3 <> '' then
+      LConn.Execute('DEL', [LChave3]);
+    LConn.Free;
+    LCache := nil;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_TextoNaoAscii_IdaEVoltaByteAByte;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LValor: string;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    LStore := TRedisCacheStore.Create(LPool);
+    LStore.Put(Chave('cache:sp'), 'São Paulo', 10000);
+    // O que foi para o servidor: os bytes UTF-8, nem um a mais.
+    TAssert.AssertEquals('53C3A36F205061756C6F',
+      Hex(LConn.Execute('GET', [Chave('cache:sp')]).AsBytes));
+    TAssert.AssertTrue(LStore.TryGet(Chave('cache:sp'), LValor));
+    TAssert.AssertEquals('São Paulo', LValor);
+
+    // E o caminho inverso: bytes UTF-8 gravados por outro cliente.
+    LConn.Execute('SET', [Chave('cache:sp'),
+      MakeBytes([$53, $C3, $A3, $6F, $20, $50, $61, $75, $6C, $6F])]);
+    TAssert.AssertTrue(LStore.TryGet(Chave('cache:sp'), LValor));
+    TAssert.AssertEquals('São Paulo', LValor);
+  finally
+    Limpa(LConn, ['cache:sp']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_ErroDeTipoOuDeResposta_Sobe;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+begin
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  try
+    Limpa(LConn, ['cache:naonum', 'cache:hash']);
+    LStore := TRedisCacheStore.Create(LPool);
+    // Bug de quem reusou o nome, nao indisponibilidade: sobe como esta'.
+    LConn.Execute('SET', [Chave('cache:naonum'), 'abc']);
+    TAssert.AssertEquals('ERedisTypeError', FalhaDoStore(LStore, 3, Chave('cache:naonum')));
+    TAssert.AssertEquals('ERedisReplyError', FalhaDoStore(LStore, 4, Chave('cache:naonum')));
+    LConn.Execute('HSET', [Chave('cache:hash'), 'campo', 'v']);
+    TAssert.AssertEquals('ERedisTypeError', FalhaDoStore(LStore, 3, Chave('cache:hash')));
+    TAssert.AssertEquals('ERedisReplyError', FalhaDoStore(LStore, 4, Chave('cache:hash')));
+    TAssert.AssertEquals('ERedisReplyError', FalhaDoStore(LStore, 0, Chave('cache:hash')));
+  finally
+    Limpa(LConn, ['cache:naonum', 'cache:hash']);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_RedisFora_ViraMissEOnError;
+var
+  LParams: TRedisParams;
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LCache: IPcCache;
+  LAvisos: TRedisCacheAvisosIt;
+  LChave, LValor: string;
+  I: Integer;
+begin
+  // Uma porta onde nao ha' Redis, como no teste do lock.
+  LParams := ParamsDeTeste;
+  LParams.Port := 1;
+  LParams.ConnectTimeoutMs := 500;
+  LPool := TRedisPool.Create(LParams);
+  LAvisos := TRedisCacheAvisosIt.Create;
+  try
+    LStore := TRedisCacheStore.Create(LPool);
+    for I := 0 to 4 do
+      TAssert.AssertEquals('operacao ' + IntToStr(I), 'EPcCacheUnavailable',
+        FalhaDoStore(LStore, I, Chave('cache:fora')));
+
+    // Pelo TPcCache: miss, loader e nenhuma excecao. RetryAfterMs = 0 para
+    // cada chamada ir ao store (sem a pausa, que o teste da common cobre).
+    LCache := TPcCache.Create(LStore, NOME_CACHE_IT, LAvisos.Aviso, 0);
+    TAssert.AssertEquals('sem contadores, sem chave', '', LCache.Key('produto', ['categoria']));
+    LChave := LCache.Key('produto', []);
+    TAssert.AssertEquals(NOME_CACHE_IT + ':v:produto|', LChave);
+    TAssert.AssertFalse(LCache.TryGet(LChave, LValor));
+    TAssert.AssertEquals('carregado:7', LCache.GetOrLoad(LChave, 60, LAvisos.Carrega, '7'));
+    TAssert.AssertEquals(1, LAvisos.Cargas);
+    LCache.Put(LChave, 'x', 60);
+    LCache.Invalidate(['categoria']);
+    LCache.Remove(LChave);
+    // Key, TryGet, GetOrLoad (TryGet + Put), Put, Invalidate, Remove.
+    TAssert.AssertEquals(7, LAvisos.Total);
+    TAssert.AssertEquals('EPcCacheUnavailable', LAvisos.Classe);
+  finally
+    LCache := nil;
+    LStore := nil;
+    LAvisos.Free;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_PoolEsgotadoOuFechado_ViraIndisponivel;
+var
+  LPoolParams: TRedisPoolParams;
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+begin
+  LPoolParams := RedisDefaultPoolParams;
+  LPoolParams.MaxSize := 1;
+  LPoolParams.AcquireTimeoutMs := 0;
+  LPool := TRedisPool.Create(ParamsDeTeste, LPoolParams);
+  try
+    LStore := TRedisCacheStore.Create(LPool);
+    LConn := LPool.Acquire;
+    try
+      TAssert.AssertEquals('pool esgotado', 'EPcCacheUnavailable',
+        FalhaDoStore(LStore, 0, Chave('cache:esgotado')));
+    finally
+      LPool.Release(LConn);
+    end;
+    LPool.Close;
+    TAssert.AssertEquals('pool fechado', 'EPcCacheUnavailable',
+      FalhaDoStore(LStore, 0, Chave('cache:esgotado')));
+  finally
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
+procedure TRedisCacheIntegrationTests.Cache_Concorrente_CriacaoUnicaEBumpsContados;
+const
+  THREADS = 8;
+  TAGS = 20;
+  RODADAS = 25;
+var
+  LPool: TRedisPool;
+  LStore: IPcCacheStore;
+  LConn: TRedisConnection;
+  LTags: array of string;
+  LSufixos: array of string;
+  LThreads: array of TRedisCacheCorridaIt;
+  LLargada: TEvent;
+  LInicial: Int64;
+  I, J: Integer;
+begin
+  SetLength(LTags, TAGS);
+  SetLength(LSufixos, TAGS + 1);
+  for I := 0 to TAGS - 1 do
+  begin
+    LSufixos[I] := 'cache:corrida:' + IntToStr(I);
+    LTags[I] := Chave(LSufixos[I]);
+  end;
+  LSufixos[TAGS] := 'cache:corrida:compartilhado';
+  SetLength(LThreads, THREADS);
+  LPool := TRedisPool.Create(ParamsDeTeste);
+  LConn := AbreConexao;
+  LLargada := TEvent.Create(nil, True, False, '');
+  try
+    Limpa(LConn, LSufixos);
+    LStore := TRedisCacheStore.Create(LPool);
+    LInicial := LStore.Generations([Chave(LSufixos[TAGS])])[0];
+    for I := 0 to THREADS - 1 do
+      LThreads[I] := TRedisCacheCorridaIt.Create(LStore, LTags, Chave(LSufixos[TAGS]),
+        RODADAS, LLargada);
+    LLargada.SetEvent;
+    for I := 0 to THREADS - 1 do
+      LThreads[I].WaitFor;
+    for I := 0 to THREADS - 1 do
+      TAssert.AssertEquals('thread ' + IntToStr(I), '', LThreads[I].Erro);
+    // Todas correram para criar o mesmo contador: um SET NX ganhou, e todas
+    // leram o valor dele.
+    for J := 0 to TAGS - 1 do
+      for I := 1 to THREADS - 1 do
+        TAssert.AssertEquals('tag ' + IntToStr(J), LThreads[0].Valores[J], LThreads[I].Valores[J]);
+    // Nenhum Bump se perdeu nem foi contado duas vezes.
+    TAssert.AssertEquals(LInicial + THREADS * RODADAS,
+      LStore.Generations([Chave(LSufixos[TAGS])])[0]);
+  finally
+    for I := 0 to THREADS - 1 do
+      LThreads[I].Free;
+    LLargada.Free;
+    Limpa(LConn, LSufixos);
+    LConn.Free;
+    LStore := nil;
+    LPool.Free;
+  end;
+end;
+
 { --- Fase D da observabilidade: spans por comando --- }
 
 function TRedisSpanColetorIt.ExportSpans(const ASpans: TPcSpanDataArray;
@@ -3333,6 +3891,7 @@ initialization
   TDUnitX.RegisterTestFixture(TRedisScriptingIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisStreamsIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisLockIntegrationTests);
+  TDUnitX.RegisterTestFixture(TRedisCacheIntegrationTests);
   TDUnitX.RegisterTestFixture(TRedisTracingIntegrationTests);
 
 end.

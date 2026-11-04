@@ -8,12 +8,12 @@ unit pascal_redis_faa;
 interface
 
 uses
-  Redis.Types, Redis.Resp, Redis.Connection, Redis.Pool, 
-  Redis.Commands, Redis.Commands.Keys, Redis.Commands.Strings, 
-  Redis.Commands.Hashes, Redis.Commands.Lists, Redis.Commands.Sets, 
-  Redis.Commands.ZSets, Redis.Commands.Streams, Redis.Commands.Scripting, 
-  Redis.Commands.PubSub, Redis.Transaction, Redis.PubSub, 
-  Redis.Client, Redis.Tracing, Redis.Lock, Redis.Transport, Redis.Transport.Tls, Redis.Transport.OpenSSL;
+  Redis.Types, Redis.Resp, Redis.Connection, Redis.Pool, Redis.Commands, 
+  Redis.Commands.Keys, Redis.Commands.Strings, Redis.Commands.Hashes, 
+  Redis.Commands.Lists, Redis.Commands.Sets, Redis.Commands.ZSets, 
+  Redis.Commands.Streams, Redis.Commands.Scripting, Redis.Commands.PubSub, 
+  Redis.Transaction, Redis.PubSub, Redis.Client, Redis.Tracing, Redis.Lock, 
+  Redis.Cache, Redis.Transport, Redis.Transport.Tls, Redis.Transport.OpenSSL;
 
 implementation
 

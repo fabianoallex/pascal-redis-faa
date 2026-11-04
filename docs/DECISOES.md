@@ -1327,6 +1327,75 @@ de comando), Win32 e Win64, configurações Debug (SChannel) e OpenSSL: unitári
 integração 76/76, `Tests Leaked: 0` nas quatro; SmokeTest 151 e 170 com `--tls` nas quatro
 (OpenSSL 3.5.2 no Win32, 3.2.4 no Win64). Nenhum ajuste foi preciso depois da rodada Delphi.
 
+## 54. `TRedisCacheStore`: o store Redis do `PascalCommon.Cache` (0.5.0, 2026-11-04)
+
+A pascal-common-faa 1.29.0 lançou o `PascalCommon.Cache` (fase F1 do `docs/cache-design.md` de
+lá): o contrato `IPcCacheStore`, o `TPcCache` com as regras (chave, tags por geração,
+single-flight, falha que vira miss, métricas) e um store em memória. O design (C1) põe o store
+Redis aqui; esta é a fase F2. A unit é a `Redis.Cache`, e o mínimo da common sobe para 1.29.0
+**só nela** (o `$IF` fica na unit; a `Redis.Types` continua pedindo 1.27.0, porque quem não usa
+o cache não precisa mais que isso). O `MinVersion` do `.lpk` sobe para 1.29, porque o pacote
+compila todas as units.
+
+1. **O store recebe o pool** (`TRedisCacheStore.Create(RedisPool)`, como no design) e monta por
+   dentro um `TRedisClient.CreateOnPool(Pool, False)`: as famílias tipadas sem dono do pool. Há
+   uma sobrecarga com `TRedisClient`, no feitio do `TRedisLock`. Cada chamada empresta uma
+   conexão e a devolve; o pool tem de viver mais que o store.
+2. **`Put` é `PSETEX`** (o prazo do contrato é em ms e o comando já existia). `TtlMs <= 0` é
+   `DEL`, como no store em memória.
+3. **`Generations` é um `MGET`.** Contador ausente nasce com `SET NX` valendo o horário Unix em
+   ms, e o `MGET` dos ausentes vai no **mesmo** pipeline: quem perde a corrida do `SET NX` lê o
+   valor de quem ganhou (há teste com 8 threads correndo para criar os mesmos 20 contadores).
+   Só a criação custa a segunda ida e volta. Se o `SET NX` não gravou e o `MGET` lê nulo, a
+   chave existe e não é string (um hash): `ERedisTypeError`, bug de quem reusou o nome.
+4. **`Bump` é um script Lua que só incrementa o contador que existe.** O `INCR` numa chave
+   ausente criaria o contador em 1 e traria de volta as entradas gravadas sob 1, 2, 3...
+   antes do eviction. Das duas saídas que o contrato deixa (criar pelo relógio ou deixar
+   ausente), ficou **deixar ausente**: o próximo `Generations` o cria pelo relógio, e
+   invalidar tags que ninguém lê (uma por linha alterada) não enche o Redis de chaves sem TTL.
+   É o mesmo que o store em memória faz. Um `INCR` condicional atômico só existe em Lua.
+5. **Lua só no `Bump`: medido** (ponto aberto do C4, 2026-11-04, Docker Desktop no Windows,
+   ~0,5 ms por ida e volta, 5000 operações por caso): `MGET` de 1 e 3 contadores, um script de
+   leitura + criação com `TIME`, `MULTI`/`SET NX`/`INCR`/`EXEC` em pipeline e o script do
+   `Bump` ficaram todos entre 0,47 e 0,83 ms por operação, com as posições trocando de uma
+   rodada para a outra: **uma ida e volta cada, nenhuma diferença acima do ruído**. Lua na
+   leitura não economiza nada no caminho quente (o `MGET` já é uma ida e volta) e traria o
+   cache de SHA e o `NOSCRIPT` para o caminho que mais roda. A outra metade do ponto aberto
+   (`MGET` + `GET` do valor num script só) é do `TPcCache`, não do store, e não foi medida.
+   Redis com scripting bloqueado por ACL faz o `Bump` levantar `ERedisReplyError` (`NOPERM`):
+   é configuração, e sobe.
+6. **O relógio do contador novo é o do cliente** (`RedisUnixTimeMs`: `GetSystemTimeAsFileTime`
+   no Windows, `fpgettimeofday` no FPC/Unix), não o `TIME` do servidor, que custaria mais uma
+   ida e volta na criação. Instâncias com relógios defasados de S ms enfraquecem a garantia do
+   C4 em S ms; um contador só renasce depois de eviction ou restart, quando a distância costuma
+   ser de horas.
+7. **Erros (C6).** Viram `EPcCacheUnavailable`, com a classe original na mensagem:
+   `ERedisConnectionLost`, `ERedisTimeout`, `ERedisPoolExhausted`, `ERedisPoolClosed`,
+   `ERedisTransport` (e a filha `ERedisTransportTimeout`; a lib já não as levanta, mas as
+   declara) e `ERedisTls`. A lista é a do `RedisIsUnavailable` do lock (§52) mais três: pool
+   fechado (desligamento), as de transporte e **TLS**, porque um certificado vencido no
+   servidor é falha de operação, não de código, e o cache fora do ar não pode derrubar a
+   aplicação. O `RedisIsUnavailable` do lock não mudou (seria mudança de comportamento numa
+   API pública); a lista do cache é a `RedisCacheIsUnavailable`. `ERedisReplyError`
+   (`WRONGTYPE`, um contador que não é número) e `ERedisTypeError` sobem como estão.
+
+Testado em 11 testes de integração (`TRedisCacheIntegrationTests`): put/get/delete com o
+`PTTL` em ms no servidor, prazo vencendo, TTL 0 e negativo, contador nascendo do relógio e sem
+TTL, `Bump` que não cria, contador apagado com `DEL` voltando maior que qualquer valor que teve
+sem que a entrada antiga seja lida pelo `TPcCache` (ela continua no Redis: quem a esconde é a
+geração), `'São Paulo'` conferido byte a byte no servidor e nos dois sentidos, erros de tipo e
+de resposta subindo, Redis fora virando miss e `OnError` (sete avisos contados) e pool esgotado
+ou fechado virando indisponível, e a corrida de 8 threads (criação única, nenhum `Bump` perdido).
+Não há teste unitário: o store é uma camada fina sobre comandos que as unitárias já cobrem, e o
+que importa nele (corrida do `SET NX`, o script, a forma das respostas) só o servidor de verdade
+diz.
+
+Medido: FPC 3.2.2 Windows x64, unitária 483/483 e integração 87/87, 0 vazamentos; FPC 3.2.2
+Linux (Debian 12), o mesmo, e quatro containers ao mesmo tempo com `CPUS=1 RUNS=5` (20 de 20
+rodadas da integração); SmokeTest 151 passos. Delphi 12 CE (build no IDE, executáveis pela linha
+de comando), Win32 e Win64, configurações Debug e OpenSSL: unitária 483/483, integração 87/87,
+`Tests Leaked: 0` nas quatro. Nenhum ajuste foi preciso depois da rodada Delphi.
+
 ---
 
 ## Compatibilidade e nomenclatura
